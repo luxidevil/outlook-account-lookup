@@ -1187,10 +1187,15 @@ app.post("/api/login-with-imap/bulk", async (req, res) => {
   res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("X-Accel-Buffering", "no"); // disable nginx-style buffering
-  const send = (obj) => res.write(JSON.stringify(obj) + "\n");
+  let aborted = false;
+  // Safe write: no-op once aborted or socket is no longer writable; swallow EPIPE etc.
+  const send = (obj) => {
+    if (aborted || res.writableEnded || res.destroyed) return false;
+    try { return res.write(JSON.stringify(obj) + "\n"); }
+    catch { aborted = true; return false; }
+  };
 
   // Detect client disconnect so we can abort and free the IMAP connection.
-  let aborted = false;
   res.on("close", () => { aborted = true; });
 
   send({ type: "open", total: pairs.length });
@@ -1221,19 +1226,21 @@ app.post("/api/login-with-imap/bulk", async (req, res) => {
       send({ type: "row", ...result });
       if (i < pairs.length - 1 && !aborted) await wait(pause);
     }
+    if (!aborted) {
+      send({
+        type: "summary",
+        total: results.length,
+        verified: results.filter((r) => r.success).length,
+        failed: results.filter((r) => !r.success).length,
+      });
+    }
+  } catch (err) {
+    // Top-level safety net once headers are sent — emit fatal if still writable.
+    send({ type: "fatal", error: err?.message ?? "Unhandled streaming error" });
   } finally {
     try { await client.logout(); } catch { /* ignore */ }
+    if (!res.writableEnded) res.end();
   }
-
-  if (!aborted) {
-    send({
-      type: "summary",
-      total: results.length,
-      verified: results.filter((r) => r.success).length,
-      failed: results.filter((r) => !r.success).length,
-    });
-  }
-  res.end();
 });
 
 /* Legacy non-streaming bulk endpoint kept for callers that want a single JSON */
