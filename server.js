@@ -500,14 +500,13 @@ function extractOtcFromSource(source) {
   return null;
 }
 
-async function searchMailboxForOtc(client, mailbox, since) {
+async function searchMailboxForOtc(client, mailbox, since, toAddress) {
   try {
     const lock = await client.getMailboxLock(mailbox);
     try {
-      const uids = await client.search(
-        { since, from: MS_FROM },
-        { uid: true },
-      );
+      const criteria = { since, from: MS_FROM };
+      if (toAddress) criteria.to = toAddress;
+      const uids = await client.search(criteria, { uid: true });
       if (!uids || uids.length === 0) return null;
       // newest first
       const latest = uids.slice(-5).reverse();
@@ -540,22 +539,12 @@ async function searchMailboxForOtc(client, mailbox, since) {
   }
 }
 
-async function fetchOtcViaImap({
-  host,
-  port,
-  secure,
-  user,
-  pass,
-  sinceMs,
-  timeoutMs,
-}) {
-  if (!host || !user || !pass) {
-    return { success: false, error: "host, user and pass are required" };
-  }
+/* Open + auth an IMAP client and discover INBOX + Junk/Spam folders.   */
+/* Used both standalone (single login) and shared across a bulk run.   */
+async function openImapClient({ host, port, secure, user, pass }) {
+  if (!host || !user || !pass) return { error: "host, user and pass are required" };
   const guardError = await validateImapTarget(host, port || 993);
-  if (guardError) return { success: false, error: guardError };
-  const since = new Date(sinceMs ? sinceMs - 30_000 : Date.now() - 5 * 60_000);
-  const deadline = Date.now() + Math.max(10_000, Math.min(180_000, timeoutMs ?? 90_000));
+  if (guardError) return { error: guardError };
 
   const client = new ImapFlow({
     host,
@@ -565,14 +554,9 @@ async function fetchOtcViaImap({
     logger: false,
     socketTimeout: 30_000,
   });
+  try { await client.connect(); }
+  catch (e) { return { error: `IMAP connect failed: ${e?.message ?? e}` }; }
 
-  try {
-    await client.connect();
-  } catch (e) {
-    return { success: false, error: `IMAP connect failed: ${e?.message ?? e}` };
-  }
-
-  // Discover candidate folders (INBOX + anything that looks like Junk/Spam)
   let folders = ["INBOX"];
   try {
     const list = await client.list();
@@ -584,26 +568,39 @@ async function fetchOtcViaImap({
       }
     }
   } catch { /* keep INBOX-only */ }
+  return { client, folders };
+}
 
-  try {
-    let attempt = 0;
-    while (Date.now() < deadline) {
-      attempt++;
-      for (const folder of folders) {
-        const hit = await searchMailboxForOtc(client, folder, since);
-        if (hit) {
-          return { success: true, attempts: attempt, foldersChecked: folders, ...hit };
-        }
-      }
-      // Wait 3s and re-poll
-      await new Promise((r) => setTimeout(r, 3000));
+/* Poll an already-open IMAP client for the next OTC email.            */
+/* `toAddress` filters by recipient — critical for bulk where many     */
+/* codes land in the same shared mailbox simultaneously.               */
+async function pollOtcOnClient(client, folders, sinceMs, toAddress, timeoutMs) {
+  const since = new Date(sinceMs ? sinceMs - 30_000 : Date.now() - 5 * 60_000);
+  const deadline = Date.now() + Math.max(10_000, Math.min(180_000, timeoutMs ?? 90_000));
+  let attempt = 0;
+  while (Date.now() < deadline) {
+    attempt++;
+    for (const folder of folders) {
+      const hit = await searchMailboxForOtc(client, folder, since, toAddress);
+      if (hit) return { success: true, attempts: attempt, foldersChecked: folders, ...hit };
     }
-    return {
-      success: false,
-      error: "Timed out waiting for OTP email — check Junk folder, IMAP creds, or sender address",
-      foldersChecked: folders,
-      attempts: attempt,
-    };
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  return {
+    success: false,
+    error: `Timed out waiting for OTP email${toAddress ? ` to ${toAddress}` : ""} — check Junk folder, IMAP creds, or sender address`,
+    foldersChecked: folders,
+    attempts: attempt,
+  };
+}
+
+/* Single-shot: open client, poll once, close. */
+async function fetchOtcViaImap({ host, port, secure, user, pass, sinceMs, timeoutMs, toAddress }) {
+  const opened = await openImapClient({ host, port, secure, user, pass });
+  if (opened.error) return { success: false, error: opened.error };
+  const { client, folders } = opened;
+  try {
+    return await pollOtcOnClient(client, folders, sinceMs, toAddress, timeoutMs);
   } finally {
     try { await client.logout(); } catch { /* ignore */ }
   }
@@ -1055,6 +1052,131 @@ app.post("/api/login-with-imap", async (req, res) => {
     nextFlowToken: verify.nextFlowToken,
     error: verify.error,
     steps,
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Bulk full sign-in: many email:alternate pairs, ONE shared IMAP    */
+/*  Body: {                                                           */
+/*    pairs: [{email, alternate}], imap:{host,port,secure,user,pass}, */
+/*    channel?, delayMs?, timeoutMs?                                  */
+/*  }                                                                 */
+/*  Reuses one IMAP connection across all pairs and disambiguates by  */
+/*  the To: header (each Microsoft OTC email is addressed to the      */
+/*  specific alternate it belongs to).                                */
+/* ------------------------------------------------------------------ */
+app.post("/api/login-with-imap/bulk", async (req, res) => {
+  const { pairs, imap, channel, delayMs, timeoutMs } = req.body ?? {};
+  if (!Array.isArray(pairs) || pairs.length === 0) {
+    return res.status(400).json({ success: false, error: "pairs must be a non-empty array" });
+  }
+  if (pairs.length > 100) {
+    return res.status(400).json({ success: false, error: "Maximum 100 pairs per request" });
+  }
+  if (!imap || !imap.host || !imap.user || !imap.pass) {
+    return res.status(400).json({ success: false, error: "imap.host / user / pass are required" });
+  }
+
+  // Open IMAP once for the whole batch
+  const opened = await openImapClient(imap);
+  if (opened.error) {
+    return res.json({ success: false, error: opened.error, results: [] });
+  }
+  const { client, folders } = opened;
+
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const pause = Math.max(800, Math.min(10_000, delayMs ?? 1500));
+  const reqChannel = channel === "SMS" ? "SMS" : "Email";
+  const proofType = reqChannel === "SMS" ? "phone" : "email";
+  const perPairTimeout = Math.max(10_000, Math.min(180_000, timeoutMs ?? 90_000));
+  const results = [];
+
+  try {
+    for (let i = 0; i < pairs.length; i++) {
+      const raw = pairs[i] ?? {};
+      const email = typeof raw.email === "string" ? raw.email.trim() : "";
+      const alternate = typeof raw.alternate === "string" ? raw.alternate.trim() : "";
+      const base = { index: i, email, channel: reqChannel };
+
+      if (!email || !email.includes("@") || !alternate) {
+        results.push({ ...base, success: false, stage: "validate", error: "Invalid pair (expected email:alternate)" });
+        if (i < pairs.length - 1) await wait(pause);
+        continue;
+      }
+
+      try {
+        const session = await getMicrosoftSession();
+        if (!session) {
+          results.push({ ...base, success: false, stage: "session", error: "Could not reach Microsoft" });
+          if (i < pairs.length - 1) await wait(pause);
+          continue;
+        }
+
+        const lookup = await lookupOne(email, session);
+        if (!lookup.success || !lookup.accountExists) {
+          results.push({ ...base, success: false, stage: "lookup", error: lookup.error ?? "Account does not exist" });
+          if (i < pairs.length - 1) await wait(pause);
+          continue;
+        }
+
+        const proof = lookup.allProofs.find((p) => p.type === proofType);
+        if (!proof) {
+          results.push({ ...base, success: false, stage: "proof", error: `No ${proofType} recovery method on file` });
+          if (i < pairs.length - 1) await wait(pause);
+          continue;
+        }
+
+        const sentAt = Date.now();
+        const otc = await sendOneTimeCode(
+          email, session, proof.proofToken, proof.display, reqChannel, alternate,
+        );
+        if (!otc.success) {
+          results.push({ ...base, success: false, stage: "send", proofDisplay: proof.display, error: otc.error ?? `state=${otc.state}` });
+          if (i < pairs.length - 1) await wait(pause);
+          continue;
+        }
+
+        const fetched = await pollOtcOnClient(client, folders, sentAt, alternate, perPairTimeout);
+        if (!fetched.success) {
+          results.push({ ...base, success: false, stage: "imap", proofDisplay: proof.display, error: fetched.error });
+          if (i < pairs.length - 1) await wait(pause);
+          continue;
+        }
+
+        const verifySession = { uaid: session.uaid, cookies: session.cookies };
+        const verify = await verifyOneTimeCode(
+          email, verifySession, otc.newFlowToken, fetched.code,
+          proof.proofToken, alternate, proof.type,
+        );
+        results.push({
+          ...base,
+          success: verify.success,
+          stage: verify.success ? "verified" : "verify",
+          proofDisplay: proof.display,
+          code: fetched.code,
+          mailbox: fetched.mailbox,
+          subject: fetched.subject,
+          httpStatus: verify.httpStatus,
+          error: verify.error,
+        });
+      } catch (err) {
+        results.push({ ...base, success: false, stage: "exception", error: err?.message ?? "Unknown error" });
+      }
+
+      if (i < pairs.length - 1) await wait(pause);
+    }
+  } finally {
+    try { await client.logout(); } catch { /* ignore */ }
+  }
+
+  res.json({
+    success: true,
+    summary: {
+      total: results.length,
+      verified: results.filter((r) => r.success).length,
+      failed: results.filter((r) => !r.success).length,
+    },
+    results,
   });
 });
 

