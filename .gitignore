@@ -6,3 +6,8 @@ node_modules/
 dist/
 .vscode/
 .idea/
+
+# HAR captures — contain live Microsoft session tokens and cookies.
+# GitHub's secret-scanning blocks them, and they shouldn't be in version control anyway.
+*.har
+attached_assets/
