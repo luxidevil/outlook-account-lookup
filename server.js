@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
+import { ImapFlow } from "imapflow";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -431,6 +432,140 @@ async function verifyOneTimeCode(
 }
 
 /* ------------------------------------------------------------------ */
+/*  IMAP — fetch the single-use code from the recovery mailbox        */
+/*  Microsoft sends a plain-text email that always contains the line  */
+/*    "Your single-use code is: 720651"                               */
+/*  We connect to the user-supplied IMAP server, poll INBOX (+Junk)   */
+/*  for messages from accountprotection.microsoft.com newer than      */
+/*  `since`, and regex out the 6-digit code.                          */
+/* ------------------------------------------------------------------ */
+const OTC_REGEX = /single-use code is[:\s]*([0-9]{6,8})/i;
+const FALLBACK_REGEX = /\b([0-9]{6,8})\b/;
+const MS_FROM = "accountprotection.microsoft.com";
+
+async function searchMailboxForOtc(client, mailbox, since) {
+  try {
+    const lock = await client.getMailboxLock(mailbox);
+    try {
+      const uids = await client.search(
+        { since, from: MS_FROM },
+        { uid: true },
+      );
+      if (!uids || uids.length === 0) return null;
+      // newest first
+      const latest = uids.slice(-5).reverse();
+      for (const uid of latest) {
+        const msg = await client.fetchOne(
+          uid,
+          { source: true, envelope: true, internalDate: true },
+          { uid: true },
+        );
+        if (!msg) continue;
+        if (msg.internalDate && msg.internalDate < since) continue;
+        const text = msg.source ? msg.source.toString("utf8") : "";
+        const m = text.match(OTC_REGEX) || text.match(FALLBACK_REGEX);
+        if (m) {
+          return {
+            code: m[1],
+            mailbox,
+            messageId: msg.envelope?.messageId ?? null,
+            subject: msg.envelope?.subject ?? null,
+            from: msg.envelope?.from?.[0]?.address ?? null,
+            receivedAt: msg.internalDate ?? null,
+          };
+        }
+      }
+      return null;
+    } finally {
+      lock.release();
+    }
+  } catch {
+    return null;
+  }
+}
+
+async function fetchOtcViaImap({
+  host,
+  port,
+  secure,
+  user,
+  pass,
+  sinceMs,
+  timeoutMs,
+}) {
+  if (!host || !user || !pass) {
+    return { success: false, error: "host, user and pass are required" };
+  }
+  const since = new Date(sinceMs ? sinceMs - 30_000 : Date.now() - 5 * 60_000);
+  const deadline = Date.now() + Math.max(10_000, Math.min(180_000, timeoutMs ?? 90_000));
+
+  const client = new ImapFlow({
+    host,
+    port: port || 993,
+    secure: secure !== false,
+    auth: { user, pass },
+    logger: false,
+    socketTimeout: 30_000,
+  });
+
+  try {
+    await client.connect();
+  } catch (e) {
+    return { success: false, error: `IMAP connect failed: ${e?.message ?? e}` };
+  }
+
+  // Discover candidate folders (INBOX + anything that looks like Junk/Spam)
+  let folders = ["INBOX"];
+  try {
+    const list = await client.list();
+    for (const m of list) {
+      const p = m?.path ?? "";
+      const flags = (m?.specialUse ?? "") + " " + (m?.name ?? "");
+      if (/junk|spam|bulk/i.test(flags) || m?.specialUse === "\\Junk") {
+        if (!folders.includes(p)) folders.push(p);
+      }
+    }
+  } catch { /* keep INBOX-only */ }
+
+  try {
+    let attempt = 0;
+    while (Date.now() < deadline) {
+      attempt++;
+      for (const folder of folders) {
+        const hit = await searchMailboxForOtc(client, folder, since);
+        if (hit) {
+          return { success: true, attempts: attempt, foldersChecked: folders, ...hit };
+        }
+      }
+      // Wait 3s and re-poll
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    return {
+      success: false,
+      error: "Timed out waiting for OTP email — check Junk folder, IMAP creds, or sender address",
+      foldersChecked: folders,
+      attempts: attempt,
+    };
+  } finally {
+    try { await client.logout(); } catch { /* ignore */ }
+  }
+}
+
+/* IMAP host hints for common providers — used by the UI to autofill */
+const IMAP_PRESETS = {
+  "gmail.com":      { host: "imap.gmail.com",       port: 993, secure: true, note: "Requires an App Password (2FA on)." },
+  "googlemail.com": { host: "imap.gmail.com",       port: 993, secure: true, note: "Requires an App Password (2FA on)." },
+  "outlook.com":    { host: "outlook.office365.com", port: 993, secure: true, note: "Requires an App Password (2FA on) or modern auth." },
+  "hotmail.com":    { host: "outlook.office365.com", port: 993, secure: true, note: "Requires an App Password (2FA on) or modern auth." },
+  "live.com":       { host: "outlook.office365.com", port: 993, secure: true, note: "Requires an App Password (2FA on) or modern auth." },
+  "yahoo.com":      { host: "imap.mail.yahoo.com",  port: 993, secure: true, note: "Requires an App Password." },
+  "ymail.com":      { host: "imap.mail.yahoo.com",  port: 993, secure: true, note: "Requires an App Password." },
+  "aol.com":        { host: "imap.aol.com",         port: 993, secure: true, note: "Requires an App Password." },
+  "icloud.com":     { host: "imap.mail.me.com",     port: 993, secure: true, note: "Requires an App-Specific Password." },
+  "me.com":         { host: "imap.mail.me.com",     port: 993, secure: true, note: "Requires an App-Specific Password." },
+};
+
+/* ------------------------------------------------------------------ */
 /*  Routes                                                            */
 /* ------------------------------------------------------------------ */
 app.post("/api/credential-check", async (req, res) => {
@@ -747,6 +882,121 @@ app.post("/api/send-otc/bulk", async (req, res) => {
       failed: results.filter((r) => !r.success).length,
     },
     results,
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  IMAP debug endpoint — manually fetch the latest OTP email         */
+/*  Body: { imap:{host,port,secure,user,pass}, sinceMs?, timeoutMs? } */
+/* ------------------------------------------------------------------ */
+app.post("/api/imap-fetch-otc", async (req, res) => {
+  const { imap, sinceMs, timeoutMs } = req.body ?? {};
+  if (!imap || typeof imap !== "object") {
+    return res.status(400).json({ success: false, error: "imap config object is required" });
+  }
+  const result = await fetchOtcViaImap({ ...imap, sinceMs, timeoutMs });
+  res.json(result);
+});
+
+/* ------------------------------------------------------------------ */
+/*  IMAP presets — UI calls this to autofill host/port for known      */
+/*  providers based on the recovery email's domain.                   */
+/* ------------------------------------------------------------------ */
+app.get("/api/imap-presets", (_req, res) => res.json(IMAP_PRESETS));
+
+/* ------------------------------------------------------------------ */
+/*  Full end-to-end login: send OTP, poll IMAP, verify OTP            */
+/*  Body: {                                                           */
+/*    email, alternate, channel?,                                     */
+/*    imap: { host, port, secure, user, pass },                       */
+/*    timeoutMs?                                                      */
+/*  }                                                                 */
+/* ------------------------------------------------------------------ */
+app.post("/api/login-with-imap", async (req, res) => {
+  const { email, alternate, channel, imap, timeoutMs } = req.body ?? {};
+  const steps = [];
+  const log = (step, ok, detail) => steps.push({ step, ok, detail });
+
+  if (!email || !email.includes("@")) {
+    return res.status(400).json({ success: false, error: "A valid email is required", steps });
+  }
+  if (!alternate) {
+    return res.status(400).json({ success: false, error: "alternate (recovery email/phone) is required", steps });
+  }
+  if (!imap || !imap.host || !imap.user || !imap.pass) {
+    return res.status(400).json({ success: false, error: "imap.host / user / pass are required", steps });
+  }
+
+  const reqChannel = channel === "SMS" ? "SMS" : "Email";
+  const proofType = reqChannel === "SMS" ? "phone" : "email";
+
+  // 1. MS session
+  const session = await getMicrosoftSession();
+  if (!session) {
+    log("microsoft-session", false, "Could not reach login.live.com");
+    return res.status(502).json({ success: false, error: "Could not reach Microsoft", steps });
+  }
+  log("microsoft-session", true, `uaid=${session.uaid?.slice(0, 8)}…`);
+
+  // 2. Lookup
+  const lookup = await lookupOne(email, session);
+  if (!lookup.success || !lookup.accountExists) {
+    log("lookup", false, lookup.error ?? "Account does not exist");
+    return res.json({ success: false, email, steps, error: log.error ?? "Lookup failed" });
+  }
+  log("lookup", true, `recovery hint: ${lookup.alternateEmail ?? lookup.phoneHint ?? "?"}`);
+
+  const proof = lookup.allProofs.find((p) => p.type === proofType);
+  if (!proof) {
+    log("proof-select", false, `No ${proofType} proof on file`);
+    return res.json({ success: false, email, steps, error: `No ${proofType} recovery method on file` });
+  }
+  log("proof-select", true, proof.display);
+
+  // 3. Send OTC — record the wall time so IMAP only considers newer mail
+  const sentAt = Date.now();
+  const otc = await sendOneTimeCode(
+    email, session, proof.proofToken, proof.display, reqChannel, alternate,
+  );
+  if (!otc.success) {
+    log("send-otc", false, otc.error ?? `state=${otc.state}`);
+    return res.json({ success: false, email, steps, error: otc.error ?? "Microsoft refused to send the OTP" });
+  }
+  log("send-otc", true, `state=${otc.state} (Microsoft accepted)`);
+
+  // 4. Poll IMAP for the code
+  const fetched = await fetchOtcViaImap({
+    ...imap,
+    sinceMs: sentAt,
+    timeoutMs: timeoutMs ?? 90_000,
+  });
+  if (!fetched.success) {
+    log("imap-fetch", false, fetched.error);
+    return res.json({ success: false, email, steps, error: fetched.error });
+  }
+  log("imap-fetch", true, `code=${fetched.code} from ${fetched.mailbox} (subject: ${fetched.subject ?? "?"})`);
+
+  // 5. Verify OTC
+  const verifySession = { uaid: session.uaid, cookies: session.cookies };
+  const verify = await verifyOneTimeCode(
+    email, verifySession, otc.newFlowToken, fetched.code,
+    proof.proofToken, alternate, proof.type,
+  );
+  log("verify-otc", verify.success, verify.error ?? `httpStatus=${verify.httpStatus}, redirect=${verify.redirectLocation ?? "(none)"}`);
+
+  res.json({
+    success: verify.success,
+    email,
+    proofDisplay: proof.display,
+    channel: reqChannel,
+    code: fetched.code,
+    mailbox: fetched.mailbox,
+    subject: fetched.subject,
+    httpStatus: verify.httpStatus,
+    redirectLocation: verify.redirectLocation,
+    nextFlowToken: verify.nextFlowToken,
+    error: verify.error,
+    steps,
   });
 });
 
