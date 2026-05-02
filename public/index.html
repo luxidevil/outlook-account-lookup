@@ -235,6 +235,22 @@
         if (!email) return;
 
         const statusEl = document.getElementById(`otc-status-${key}`);
+
+        // Step 2: Microsoft requires the full un-masked alternate email/phone
+        // (the "Verify your identity" page) before it will send the OTC.
+        const promptLabel =
+          channel === "SMS"
+            ? `Enter the FULL recovery phone (matches hint ${proofDisplay}):`
+            : `Enter the FULL recovery email (matches hint ${proofDisplay}):`;
+        const proofConfirmation = window.prompt(promptLabel, "");
+        if (!proofConfirmation || !proofConfirmation.trim()) {
+          if (statusEl) {
+            statusEl.className = "text-xs text-red-500";
+            statusEl.textContent = "Cancelled";
+          }
+          return;
+        }
+
         btn.disabled = true;
         btn.textContent = "Sending…";
         if (statusEl) statusEl.textContent = "";
@@ -243,7 +259,12 @@
           const r = await fetch("/api/send-otc", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ email, proofDisplay, channel }),
+            body: JSON.stringify({
+              email,
+              proofDisplay,
+              channel,
+              proofConfirmation: proofConfirmation.trim(),
+            }),
           });
           const data = await r.json();
           if (data.success) {

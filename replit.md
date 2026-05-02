@@ -20,7 +20,14 @@ A Node.js/Express web app that looks up Microsoft/Outlook accounts and reveals t
 ## How It Works
 1. Fetches a Microsoft session (PPFT flow token, uaid, cookies) from `login.live.com`
 2. Calls `GetCredentialType.srf` to check if an account exists and retrieve masked recovery proof hints
-3. Optionally calls `GetOneTimeCode.srf` to send an OTP to the recovery email/phone (State 201 = sent successfully)
+3. **Verify identity (step 2)**: the caller must supply the FULL un-masked alternate email/phone matching the masked hint. The server passes it as `ProofConfirmation=\t<full alt>` (with leading tab) along with the encrypted `AltEmailE` / `AltPhoneE` token to `GetOneTimeCode.srf`.
+4. `GetOneTimeCode.srf` sends the OTP to the recovery proof (State 201 = sent successfully).
+
+### `/api/send-otc` request body
+```json
+{ "email": "target@outlook.com", "channel": "Email", "proofConfirmation": "full-unmasked-alt@example.com" }
+```
+`proofConfirmation` is required; without it Microsoft rejects the OTC request.
 
 ## Running
 ```

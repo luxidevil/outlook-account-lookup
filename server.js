@@ -204,8 +204,22 @@ async function lookupOne(email, session) {
 /* ------------------------------------------------------------------ */
 /*  Send a One-Time Code to a recovery proof                         */
 /* ------------------------------------------------------------------ */
-async function sendOneTimeCode(email, session, proofToken, proofDisplay, channel = "Email") {
+async function sendOneTimeCode(
+  email,
+  session,
+  proofToken,
+  proofDisplay,
+  channel = "Email",
+  proofConfirmation = null,
+) {
   const { flowToken, uaid, cookies } = session;
+
+  // Microsoft's "Verify your identity" step requires the FULL un-masked
+  // alternate email or phone, prefixed with a tab character. The masked
+  // `proofDisplay` (e.g. el****@de****.space) will be rejected.
+  const confirmationValue = proofConfirmation
+    ? `\t${proofConfirmation}`
+    : proofDisplay;
 
   const params = new URLSearchParams({
     login: email,
@@ -215,7 +229,7 @@ async function sendOneTimeCode(email, session, proofToken, proofDisplay, channel
     ChallengeViewSupported: "1",
     uaid,
     lcid: "2057",
-    ProofConfirmation: proofDisplay,
+    ProofConfirmation: confirmationValue,
   });
 
   // Only include AltEmailE / AltPhoneE if we have the encrypted token
@@ -344,9 +358,15 @@ app.post("/api/credential-check/bulk", async (req, res) => {
 /*  Send OTC to a recovery proof for a given email                   */
 /* ------------------------------------------------------------------ */
 app.post("/api/send-otc", async (req, res) => {
-  const { email, proofDisplay, channel } = req.body ?? {};
+  const { email, proofDisplay, channel, proofConfirmation } = req.body ?? {};
   if (!email || !email.includes("@")) {
     return res.status(400).json({ success: false, error: "A valid email is required" });
+  }
+  if (!proofConfirmation || typeof proofConfirmation !== "string" || proofConfirmation.trim().length === 0) {
+    return res.status(400).json({
+      success: false,
+      error: "proofConfirmation is required (the full un-masked alternate email or phone the user typed in)",
+    });
   }
 
   // Step 1: get a fresh Microsoft session
@@ -384,13 +404,15 @@ app.post("/api/send-otc", async (req, res) => {
     });
   }
 
-  // Step 4: send the OTC
+  // Step 4: send the OTC, passing the full un-masked alternate email/phone
+  // the user typed in (Microsoft's "Verify your identity" step)
   const otcResult = await sendOneTimeCode(
     email,
     session,
     proof.proofToken,
     proof.display,
     targetChannel,
+    proofConfirmation.trim(),
   );
 
   res.json({
