@@ -1119,6 +1119,58 @@ app.post("/api/login-with-imap", async (req, res) => {
 /*  the To: header (each Microsoft OTC email is addressed to the      */
 /*  specific alternate it belongs to).                                */
 /* ------------------------------------------------------------------ */
+async function processOnePair(raw, i, ctx) {
+  const email = typeof raw?.email === "string" ? raw.email.trim() : "";
+  const alternate = typeof raw?.alternate === "string" ? raw.alternate.trim() : "";
+  const base = { index: i, email, channel: ctx.reqChannel };
+
+  if (!email || !email.includes("@") || !alternate) {
+    return { ...base, success: false, stage: "validate", error: "Invalid pair (expected email:alternate)" };
+  }
+  try {
+    const session = await getMicrosoftSession();
+    if (!session) return { ...base, success: false, stage: "session", error: "Could not reach Microsoft" };
+
+    const lookup = await lookupOne(email, session);
+    if (!lookup.success || !lookup.accountExists) {
+      return { ...base, success: false, stage: "lookup", error: lookup.error ?? "Account does not exist" };
+    }
+
+    const proof = lookup.allProofs.find((p) => p.type === ctx.proofType);
+    if (!proof) return { ...base, success: false, stage: "proof", error: `No ${ctx.proofType} recovery method on file` };
+
+    const sentAt = Date.now();
+    const otc = await sendOneTimeCode(email, session, proof.proofToken, proof.display, ctx.reqChannel, alternate);
+    if (!otc.success) {
+      return { ...base, success: false, stage: "send", proofDisplay: proof.display, error: otc.error ?? `state=${otc.state}` };
+    }
+
+    const fetched = await pollOtcOnClient(ctx.client, ctx.folders, sentAt, alternate, ctx.perPairTimeout);
+    if (!fetched.success) {
+      return { ...base, success: false, stage: "imap", proofDisplay: proof.display, error: fetched.error };
+    }
+
+    const verifySession = { uaid: session.uaid, cookies: session.cookies, proxySession: session.proxySession };
+    const verify = await verifyOneTimeCode(
+      email, verifySession, otc.newFlowToken, fetched.code,
+      proof.proofToken, alternate, proof.type,
+    );
+    return {
+      ...base,
+      success: verify.success,
+      stage: verify.success ? "verified" : "verify",
+      proofDisplay: proof.display,
+      code: fetched.code,
+      mailbox: fetched.mailbox,
+      subject: fetched.subject,
+      httpStatus: verify.httpStatus,
+      error: verify.error,
+    };
+  } catch (err) {
+    return { ...base, success: false, stage: "exception", error: err?.message ?? "Unknown error" };
+  }
+}
+
 app.post("/api/login-with-imap/bulk", async (req, res) => {
   const { pairs, imap, channel, delayMs, timeoutMs } = req.body ?? {};
   if (!Array.isArray(pairs) || pairs.length === 0) {
@@ -1131,98 +1183,85 @@ app.post("/api/login-with-imap/bulk", async (req, res) => {
     return res.status(400).json({ success: false, error: "imap.host / user / pass are required" });
   }
 
-  // Open IMAP once for the whole batch
+  // Stream NDJSON so the UI can render each row the instant it finishes.
+  res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("X-Accel-Buffering", "no"); // disable nginx-style buffering
+  const send = (obj) => res.write(JSON.stringify(obj) + "\n");
+
+  // Detect client disconnect so we can abort and free the IMAP connection.
+  let aborted = false;
+  res.on("close", () => { aborted = true; });
+
+  send({ type: "open", total: pairs.length });
+
   const opened = await openImapClient(imap);
   if (opened.error) {
-    return res.json({ success: false, error: opened.error, results: [] });
+    send({ type: "fatal", error: opened.error });
+    return res.end();
   }
   const { client, folders } = opened;
 
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const pause = Math.max(800, Math.min(10_000, delayMs ?? 1500));
   const reqChannel = channel === "SMS" ? "SMS" : "Email";
-  const proofType = reqChannel === "SMS" ? "phone" : "email";
-  const perPairTimeout = Math.max(10_000, Math.min(180_000, timeoutMs ?? 90_000));
+  const ctx = {
+    client, folders, reqChannel,
+    proofType: reqChannel === "SMS" ? "phone" : "email",
+    perPairTimeout: Math.max(10_000, Math.min(180_000, timeoutMs ?? 90_000)),
+  };
   const results = [];
 
   try {
     for (let i = 0; i < pairs.length; i++) {
-      const raw = pairs[i] ?? {};
-      const email = typeof raw.email === "string" ? raw.email.trim() : "";
-      const alternate = typeof raw.alternate === "string" ? raw.alternate.trim() : "";
-      const base = { index: i, email, channel: reqChannel };
-
-      if (!email || !email.includes("@") || !alternate) {
-        results.push({ ...base, success: false, stage: "validate", error: "Invalid pair (expected email:alternate)" });
-        if (i < pairs.length - 1) await wait(pause);
-        continue;
-      }
-
-      try {
-        const session = await getMicrosoftSession();
-        if (!session) {
-          results.push({ ...base, success: false, stage: "session", error: "Could not reach Microsoft" });
-          if (i < pairs.length - 1) await wait(pause);
-          continue;
-        }
-
-        const lookup = await lookupOne(email, session);
-        if (!lookup.success || !lookup.accountExists) {
-          results.push({ ...base, success: false, stage: "lookup", error: lookup.error ?? "Account does not exist" });
-          if (i < pairs.length - 1) await wait(pause);
-          continue;
-        }
-
-        const proof = lookup.allProofs.find((p) => p.type === proofType);
-        if (!proof) {
-          results.push({ ...base, success: false, stage: "proof", error: `No ${proofType} recovery method on file` });
-          if (i < pairs.length - 1) await wait(pause);
-          continue;
-        }
-
-        const sentAt = Date.now();
-        const otc = await sendOneTimeCode(
-          email, session, proof.proofToken, proof.display, reqChannel, alternate,
-        );
-        if (!otc.success) {
-          results.push({ ...base, success: false, stage: "send", proofDisplay: proof.display, error: otc.error ?? `state=${otc.state}` });
-          if (i < pairs.length - 1) await wait(pause);
-          continue;
-        }
-
-        const fetched = await pollOtcOnClient(client, folders, sentAt, alternate, perPairTimeout);
-        if (!fetched.success) {
-          results.push({ ...base, success: false, stage: "imap", proofDisplay: proof.display, error: fetched.error });
-          if (i < pairs.length - 1) await wait(pause);
-          continue;
-        }
-
-        const verifySession = { uaid: session.uaid, cookies: session.cookies, proxySession: session.proxySession };
-        const verify = await verifyOneTimeCode(
-          email, verifySession, otc.newFlowToken, fetched.code,
-          proof.proofToken, alternate, proof.type,
-        );
-        results.push({
-          ...base,
-          success: verify.success,
-          stage: verify.success ? "verified" : "verify",
-          proofDisplay: proof.display,
-          code: fetched.code,
-          mailbox: fetched.mailbox,
-          subject: fetched.subject,
-          httpStatus: verify.httpStatus,
-          error: verify.error,
-        });
-      } catch (err) {
-        results.push({ ...base, success: false, stage: "exception", error: err?.message ?? "Unknown error" });
-      }
-
-      if (i < pairs.length - 1) await wait(pause);
+      if (aborted) break;
+      send({ type: "start", index: i, email: typeof pairs[i]?.email === "string" ? pairs[i].email.trim() : "" });
+      const result = await processOnePair(pairs[i], i, ctx);
+      results.push(result);
+      send({ type: "row", ...result });
+      if (i < pairs.length - 1 && !aborted) await wait(pause);
     }
   } finally {
     try { await client.logout(); } catch { /* ignore */ }
   }
 
+  if (!aborted) {
+    send({
+      type: "summary",
+      total: results.length,
+      verified: results.filter((r) => r.success).length,
+      failed: results.filter((r) => !r.success).length,
+    });
+  }
+  res.end();
+});
+
+/* Legacy non-streaming bulk endpoint kept for callers that want a single JSON */
+app.post("/api/login-with-imap/bulk-sync", async (req, res) => {
+  const { pairs, imap, channel, delayMs, timeoutMs } = req.body ?? {};
+  if (!Array.isArray(pairs) || pairs.length === 0) {
+    return res.status(400).json({ success: false, error: "pairs must be a non-empty array" });
+  }
+  if (pairs.length > 100) return res.status(400).json({ success: false, error: "Maximum 100 pairs per request" });
+  if (!imap || !imap.host || !imap.user || !imap.pass) {
+    return res.status(400).json({ success: false, error: "imap.host / user / pass are required" });
+  }
+  const opened = await openImapClient(imap);
+  if (opened.error) return res.json({ success: false, error: opened.error, results: [] });
+  const { client, folders } = opened;
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const pause = Math.max(800, Math.min(10_000, delayMs ?? 1500));
+  const reqChannel = channel === "SMS" ? "SMS" : "Email";
+  const ctx = { client, folders, reqChannel,
+    proofType: reqChannel === "SMS" ? "phone" : "email",
+    perPairTimeout: Math.max(10_000, Math.min(180_000, timeoutMs ?? 90_000)) };
+  const results = [];
+  try {
+    for (let i = 0; i < pairs.length; i++) {
+      results.push(await processOnePair(pairs[i], i, ctx));
+      if (i < pairs.length - 1) await wait(pause);
+    }
+  } finally { try { await client.logout(); } catch {} }
   res.json({
     success: true,
     summary: {
