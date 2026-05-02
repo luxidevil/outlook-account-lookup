@@ -8,7 +8,7 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 const UA =
   "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/147.0.0.0 Mobile Safari/537.36";
@@ -16,16 +16,6 @@ const UA =
 /* ------------------------------------------------------------------ */
 /*  Microsoft session helper                                          */
 /* ------------------------------------------------------------------ */
-/*
- * Microsoft's GetCredentialType endpoint requires:
- *   1. A `PPFT` flow token, embedded in the login.live.com HTML.
- *   2. The session cookies set while loading that page.
- *   3. A correlation/uaid value also embedded in the page.
- *
- * We hit https://login.live.com/login.srf with manual redirect handling so
- * we can accumulate every Set-Cookie along the way, then scrape the page
- * for the flow token and uaid.
- */
 async function getMicrosoftSession() {
   let url =
     "https://login.live.com/login.srf?wa=wsignin1.0&rpsnv=13&ct=1&rver=7.0.6737.0" +
@@ -176,7 +166,16 @@ async function lookupOne(email, session) {
               : p.type === 5
                 ? "authenticator"
                 : `type_${p.type ?? "?"}`;
-        allProofs.push({ type: typeName, display, isDefault: !!p.isDefault });
+
+        // Capture encrypted proof token (AltEmailE / AltPhoneE) if present
+        const proofToken = p.proof ?? p.proofToken ?? p.clearDigits ?? null;
+
+        allProofs.push({
+          type: typeName,
+          display,
+          isDefault: !!p.isDefault,
+          proofToken,
+        });
 
         if (p.type === 1 && !alternateEmail) {
           alternateEmail = display;
@@ -200,6 +199,76 @@ async function lookupOne(email, session) {
   } catch (err) {
     return { email, success: false, error: err?.message ?? "Unknown error" };
   }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Send a One-Time Code to a recovery proof                         */
+/* ------------------------------------------------------------------ */
+async function sendOneTimeCode(email, session, proofToken, proofDisplay, channel = "Email") {
+  const { flowToken, uaid, cookies } = session;
+
+  const params = new URLSearchParams({
+    login: email,
+    flowtoken: flowToken,
+    purpose: "eOTT_OtcLogin",
+    channel,
+    ChallengeViewSupported: "1",
+    uaid,
+    lcid: "2057",
+    ProofConfirmation: proofDisplay,
+  });
+
+  // Only include AltEmailE / AltPhoneE if we have the encrypted token
+  if (proofToken) {
+    if (channel === "Email") {
+      params.set("AltEmailE", proofToken);
+    } else if (channel === "SMS") {
+      params.set("AltPhoneE", proofToken);
+    }
+  }
+
+  const otcRes = await fetch(
+    "https://login.live.com/GetOneTimeCode.srf?id=292841&client_id=00000000487A244A",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": UA,
+        Origin: "https://login.live.com",
+        Referer: "https://login.live.com/",
+        Accept: "application/json",
+        "Accept-Language": "en-GB,en-US;q=0.9",
+        hpgact: "0",
+        hpgid: "33",
+        "client-request-id": uaid,
+        correlationId: uaid,
+        ...(cookies ? { Cookie: cookies } : {}),
+      },
+      body: params.toString(),
+    },
+  );
+
+  const rawText = await otcRes.text();
+  let otcData;
+  try {
+    otcData = JSON.parse(rawText);
+  } catch {
+    return {
+      success: false,
+      error: `Microsoft returned non-JSON (status ${otcRes.status})`,
+      rawText,
+    };
+  }
+
+  // State 201 = OTC sent successfully
+  const sent = otcData.State === 201;
+  return {
+    success: sent,
+    state: otcData.State,
+    newFlowToken: otcData.FlowToken ?? null,
+    error: sent ? null : `OTC send failed with state ${otcData.State}`,
+    raw: otcData,
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -271,6 +340,67 @@ app.post("/api/credential-check/bulk", async (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`Outlook Account Lookup running on http://localhost:${PORT}`);
+/* ------------------------------------------------------------------ */
+/*  Send OTC to a recovery proof for a given email                   */
+/* ------------------------------------------------------------------ */
+app.post("/api/send-otc", async (req, res) => {
+  const { email, proofDisplay, channel } = req.body ?? {};
+  if (!email || !email.includes("@")) {
+    return res.status(400).json({ success: false, error: "A valid email is required" });
+  }
+
+  // Step 1: get a fresh Microsoft session
+  const session = await getMicrosoftSession();
+  if (!session) {
+    return res.status(502).json({ success: false, error: "Could not reach Microsoft login page" });
+  }
+
+  // Step 2: credential check to get proof tokens
+  const lookup = await lookupOne(email, session);
+  if (!lookup.success) {
+    return res.status(502).json({ success: false, error: lookup.error });
+  }
+  if (!lookup.accountExists) {
+    return res.status(404).json({ success: false, error: "No Microsoft account found for this email" });
+  }
+
+  // Step 3: pick the target proof (by display hint or default to first email proof)
+  const targetChannel = channel === "SMS" ? "SMS" : "Email";
+  const proofType = targetChannel === "SMS" ? "phone" : "email";
+  let proof = null;
+
+  if (proofDisplay) {
+    proof = lookup.allProofs.find((p) => p.type === proofType && p.display === proofDisplay);
+  }
+  if (!proof) {
+    proof = lookup.allProofs.find((p) => p.type === proofType);
+  }
+
+  if (!proof) {
+    return res.status(404).json({
+      success: false,
+      error: `No ${proofType} recovery method found on this account`,
+      allProofs: lookup.allProofs,
+    });
+  }
+
+  // Step 4: send the OTC
+  const otcResult = await sendOneTimeCode(
+    email,
+    session,
+    proof.proofToken,
+    proof.display,
+    targetChannel,
+  );
+
+  res.json({
+    ...otcResult,
+    email,
+    proofDisplay: proof.display,
+    channel: targetChannel,
+  });
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Outlook Account Lookup running on http://0.0.0.0:${PORT}`);
 });

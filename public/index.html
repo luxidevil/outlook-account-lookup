@@ -114,6 +114,9 @@
           ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
         );
 
+      // --- OTC send state ---
+      const otcState = {};
+
       // --- Single lookup ---
       $("#single-form").addEventListener("submit", async (e) => {
         e.preventDefault();
@@ -176,14 +179,32 @@
           ? `<div class="p-5 border-t border-slate-100">
               <div class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-3">All Recovery Methods</div>
               <div class="space-y-2">
-                ${d.allProofs.map((p) => `
-                  <div class="flex items-center justify-between gap-3 p-3 rounded-lg bg-slate-50">
+                ${d.allProofs.map((p, i) => {
+                  const proofKey = `${escapeHtml(d.email)}__${i}`;
+                  const canSendOtc = p.type === "email" || p.type === "phone";
+                  const channel = p.type === "phone" ? "SMS" : "Email";
+                  const otcBtn = canSendOtc
+                    ? `<button
+                        class="otc-btn text-xs font-semibold px-3 py-1.5 rounded-lg bg-violet-100 text-violet-700 hover:bg-violet-200 disabled:opacity-50 whitespace-nowrap"
+                        data-email="${escapeHtml(d.email)}"
+                        data-proof="${escapeHtml(p.display)}"
+                        data-channel="${channel}"
+                        data-key="${proofKey}">
+                        Send OTP
+                      </button>`
+                    : "";
+                  return `<div class="flex items-center justify-between gap-3 p-3 rounded-lg bg-slate-50" id="proof-row-${proofKey}">
                     <div class="flex items-center gap-3 min-w-0">
                       <span class="text-xs font-semibold uppercase px-2 py-1 rounded bg-blue-100 text-blue-700">${escapeHtml(p.type)}</span>
                       <span class="font-mono text-sm text-slate-900 truncate">${escapeHtml(p.display)}</span>
+                      ${p.isDefault ? `<span class="text-xs text-emerald-600 font-semibold whitespace-nowrap">default</span>` : ""}
                     </div>
-                    ${p.isDefault ? `<span class="text-xs text-emerald-600 font-semibold whitespace-nowrap">default</span>` : ""}
-                  </div>`).join("")}
+                    <div class="flex items-center gap-2">
+                      <span id="otc-status-${proofKey}" class="text-xs"></span>
+                      ${otcBtn}
+                    </div>
+                  </div>`;
+                }).join("")}
               </div>
             </div>`
           : "";
@@ -205,6 +226,51 @@
           <p class="text-sm text-red-700 mt-1">${escapeHtml(msg)}</p>
         </div>`;
       }
+
+      // --- OTC send handler (delegated) ---
+      document.addEventListener("click", async (e) => {
+        const btn = e.target?.closest(".otc-btn");
+        if (!btn) return;
+        const { email, proof: proofDisplay, channel, key } = btn.dataset;
+        if (!email) return;
+
+        const statusEl = document.getElementById(`otc-status-${key}`);
+        btn.disabled = true;
+        btn.textContent = "Sending…";
+        if (statusEl) statusEl.textContent = "";
+
+        try {
+          const r = await fetch("/api/send-otc", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, proofDisplay, channel }),
+          });
+          const data = await r.json();
+          if (data.success) {
+            btn.textContent = "Sent ✓";
+            btn.classList.remove("bg-violet-100", "text-violet-700", "hover:bg-violet-200");
+            btn.classList.add("bg-emerald-100", "text-emerald-700");
+            if (statusEl) {
+              statusEl.className = "text-xs text-emerald-600 font-semibold";
+              statusEl.textContent = "OTP sent";
+            }
+          } else {
+            btn.disabled = false;
+            btn.textContent = "Send OTP";
+            if (statusEl) {
+              statusEl.className = "text-xs text-red-500";
+              statusEl.textContent = data.error ?? "Failed";
+            }
+          }
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = "Send OTP";
+          if (statusEl) {
+            statusEl.className = "text-xs text-red-500";
+            statusEl.textContent = err.message;
+          }
+        }
+      });
 
       // --- Bulk ---
       const bulkEmails = $("#bulk-emails");
@@ -273,12 +339,10 @@
           </div>`;
         };
 
-        // Unique domains from results that have an alternate domain
         const domains = [...new Set(results
           .filter((r) => r.alternateDomain)
           .map((r) => r.alternateDomain))].sort();
 
-        // Apply current domain filter
         const visible = domainFilter
           ? results.filter((r) => r.alternateDomain === domainFilter)
           : results;
