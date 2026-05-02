@@ -1,0 +1,25 @@
+{
+  "name": "outlook-account-lookup",
+  "version": "1.0.0",
+  "description": "Look up Microsoft / Outlook accounts and reveal the masked recovery email and phone hint Microsoft exposes via its public GetCredentialType API.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "keywords": [
+    "microsoft",
+    "outlook",
+    "account-lookup",
+    "osint",
+    "email"
+  ],
+  "license": "MIT"
+}

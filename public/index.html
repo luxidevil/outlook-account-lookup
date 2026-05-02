@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Microsoft Account Lookup</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    </style>
+  </head>
+  <body class="bg-gradient-to-br from-slate-50 to-blue-50 min-h-screen">
+    <div class="max-w-3xl mx-auto py-12 px-4">
+      <div class="text-center mb-6">
+        <div class="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-blue-600 mb-4">
+          <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z"/>
+          </svg>
+        </div>
+        <h1 class="text-2xl font-bold text-slate-900">Microsoft Account Lookup</h1>
+        <p class="text-slate-500 text-sm mt-1">
+          See the masked recovery email &amp; phone Microsoft has on file
+        </p>
+      </div>
+
+      <!-- Tabs -->
+      <div class="bg-white rounded-2xl border border-slate-200 p-1 flex gap-1 shadow-sm mb-4">
+        <button id="tab-single" class="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-blue-600 text-white">
+          Single Email
+        </button>
+        <button id="tab-bulk" class="flex-1 py-2.5 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-50">
+          Bulk (up to 100)
+        </button>
+      </div>
+
+      <!-- SINGLE -->
+      <section id="panel-single">
+        <form id="single-form" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+          <label class="block text-sm font-semibold text-slate-700 mb-2">Email Address</label>
+          <div class="flex gap-3">
+            <input id="single-email" type="email" required placeholder="someone@outlook.com"
+              class="flex-1 px-4 py-3 rounded-xl border border-slate-200 text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            <button type="submit" id="single-btn"
+              class="px-6 py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 disabled:opacity-50">
+              Lookup
+            </button>
+          </div>
+        </form>
+        <div id="single-result" class="mt-4 space-y-3"></div>
+      </section>
+
+      <!-- BULK -->
+      <section id="panel-bulk" class="hidden">
+        <form id="bulk-form" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <label class="text-sm font-semibold text-slate-700">Email Addresses</label>
+              <span id="bulk-count" class="text-xs text-slate-400">0 emails detected</span>
+            </div>
+            <textarea id="bulk-emails" rows="10" spellcheck="false"
+              placeholder="alice@outlook.com&#10;bob@hotmail.com&#10;charlie@live.com&#10;..."
+              class="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-slate-900 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"></textarea>
+            <p class="text-xs text-slate-400 mt-1.5">Paste one email per line, or comma/space separated. Up to 100.</p>
+          </div>
+          <div class="flex items-end gap-3">
+            <div class="flex-1">
+              <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
+                Delay between requests (ms)
+              </label>
+              <input id="bulk-delay" type="number" min="0" max="5000" step="100" value="800"
+                class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <button type="submit" id="bulk-btn"
+              class="px-6 py-2.5 rounded-lg bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap">
+              Lookup
+            </button>
+          </div>
+        </form>
+        <div id="bulk-result" class="mt-4 space-y-3"></div>
+      </section>
+
+      <p class="text-center text-xs text-slate-400 mt-6">
+        Calls happen server-side using one shared session. Microsoft only returns masked hints
+        (e.g. <code class="bg-slate-100 px-1 py-0.5 rounded font-mono">u***@g***.com</code>).
+      </p>
+    </div>
+
+    <script>
+      const $ = (s) => document.querySelector(s);
+
+      // --- Tab switching ---
+      const tabSingle = $("#tab-single");
+      const tabBulk = $("#tab-bulk");
+      const panelSingle = $("#panel-single");
+      const panelBulk = $("#panel-bulk");
+      function selectTab(which) {
+        const isSingle = which === "single";
+        panelSingle.classList.toggle("hidden", !isSingle);
+        panelBulk.classList.toggle("hidden", isSingle);
+        tabSingle.classList.toggle("bg-blue-600", isSingle);
+        tabSingle.classList.toggle("text-white", isSingle);
+        tabSingle.classList.toggle("text-slate-600", !isSingle);
+        tabBulk.classList.toggle("bg-blue-600", !isSingle);
+        tabBulk.classList.toggle("text-white", !isSingle);
+        tabBulk.classList.toggle("text-slate-600", isSingle);
+      }
+      tabSingle.addEventListener("click", () => selectTab("single"));
+      tabBulk.addEventListener("click", () => selectTab("bulk"));
+
+      // --- Helpers ---
+      const escapeHtml = (s) =>
+        String(s ?? "").replace(/[&<>"']/g, (c) =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+        );
+
+      // --- Single lookup ---
+      $("#single-form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const email = $("#single-email").value.trim();
+        if (!email) return;
+        const btn = $("#single-btn");
+        const out = $("#single-result");
+        btn.disabled = true; btn.textContent = "Checking…";
+        out.innerHTML = "";
+        try {
+          const r = await fetch("/api/credential-check", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email }),
+          });
+          const data = await r.json();
+          out.innerHTML = renderSingle(data);
+        } catch (err) {
+          out.innerHTML = renderError(err.message);
+        } finally {
+          btn.disabled = false; btn.textContent = "Lookup";
+        }
+      });
+
+      function renderSingle(d) {
+        if (!d.success) {
+          return `<div class="rounded-2xl border bg-red-50 border-red-200 p-5">
+            <p class="font-semibold text-sm text-red-800">Lookup failed</p>
+            <p class="text-sm text-red-700 mt-1">${escapeHtml(d.error)}</p>
+            <p class="text-xs text-slate-500 font-mono mt-1">${escapeHtml(d.email)}</p>
+          </div>`;
+        }
+        const banner = d.accountExists
+          ? `<div class="rounded-2xl border bg-emerald-50 border-emerald-200 p-5">
+              <p class="font-semibold text-sm text-emerald-800">Account exists on Microsoft</p>
+              <p class="text-xs text-slate-500 font-mono mt-1">${escapeHtml(d.email)}</p>
+            </div>`
+          : `<div class="rounded-2xl border bg-amber-50 border-amber-200 p-5">
+              <p class="font-semibold text-sm text-amber-800">No Microsoft account found</p>
+              <p class="text-xs text-slate-500 font-mono mt-1">${escapeHtml(d.email)}</p>
+            </div>`;
+
+        if (!d.accountExists) return banner;
+
+        const altBlock = d.alternateEmail
+          ? `<div class="flex items-baseline gap-3 flex-wrap">
+              <span class="text-2xl font-mono font-bold text-slate-900">${escapeHtml(d.alternateEmail)}</span>
+              ${d.alternateDomain ? `<span class="text-sm text-slate-500">domain: <span class="font-mono font-semibold text-blue-600">${escapeHtml(d.alternateDomain)}</span></span>` : ""}
+            </div>`
+          : `<p class="text-sm text-slate-400 italic">Microsoft did not return a recovery email hint</p>`;
+
+        const phoneBlock = d.phoneHint
+          ? `<div class="p-5 border-t border-slate-100">
+              <div class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">Phone Hint</div>
+              <span class="text-2xl font-mono font-bold text-slate-900">${escapeHtml(d.phoneHint)}</span>
+            </div>`
+          : "";
+
+        const proofsBlock = (d.allProofs || []).length
+          ? `<div class="p-5 border-t border-slate-100">
+              <div class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-3">All Recovery Methods</div>
+              <div class="space-y-2">
+                ${d.allProofs.map((p) => `
+                  <div class="flex items-center justify-between gap-3 p-3 rounded-lg bg-slate-50">
+                    <div class="flex items-center gap-3 min-w-0">
+                      <span class="text-xs font-semibold uppercase px-2 py-1 rounded bg-blue-100 text-blue-700">${escapeHtml(p.type)}</span>
+                      <span class="font-mono text-sm text-slate-900 truncate">${escapeHtml(p.display)}</span>
+                    </div>
+                    ${p.isDefault ? `<span class="text-xs text-emerald-600 font-semibold whitespace-nowrap">default</span>` : ""}
+                  </div>`).join("")}
+              </div>
+            </div>`
+          : "";
+
+        return `${banner}
+          <div class="bg-white rounded-2xl shadow-sm border border-slate-200">
+            <div class="p-5">
+              <div class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">Alternate Recovery Email</div>
+              ${altBlock}
+            </div>
+            ${phoneBlock}
+            ${proofsBlock}
+          </div>`;
+      }
+
+      function renderError(msg) {
+        return `<div class="rounded-2xl border bg-red-50 border-red-200 p-5">
+          <p class="font-semibold text-sm text-red-800">Request failed</p>
+          <p class="text-sm text-red-700 mt-1">${escapeHtml(msg)}</p>
+        </div>`;
+      }
+
+      // --- Bulk ---
+      const bulkEmails = $("#bulk-emails");
+      const bulkCount = $("#bulk-count");
+      function parseEmails() {
+        return bulkEmails.value.split(/[\s,;]+/).map((e) => e.trim()).filter((e) => e.includes("@"));
+      }
+      bulkEmails.addEventListener("input", () => {
+        const n = parseEmails().length;
+        bulkCount.textContent = `${n} email${n === 1 ? "" : "s"} detected`;
+      });
+
+      $("#bulk-form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const emails = parseEmails();
+        if (!emails.length) return;
+        const delayMs = Number($("#bulk-delay").value) || 800;
+        const btn = $("#bulk-btn");
+        const out = $("#bulk-result");
+        btn.disabled = true; btn.textContent = "Running…";
+        out.innerHTML = `
+          <div class="bg-white rounded-2xl border border-slate-200 p-5 text-sm text-slate-600 flex items-center gap-3">
+            <svg class="w-5 h-5 animate-spin text-blue-600" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+            </svg>
+            <span>Processing ${emails.length} email${emails.length === 1 ? "" : "s"} sequentially…</span>
+          </div>`;
+        try {
+          const r = await fetch("/api/credential-check/bulk", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ emails, delayMs }),
+          });
+          const data = await r.json();
+          out.innerHTML = renderBulk(data);
+        } catch (err) {
+          out.innerHTML = renderError(err.message);
+        } finally {
+          btn.disabled = false; btn.textContent = "Lookup";
+        }
+      });
+
+      // Stored bulk state for filtering / downloads
+      let bulkState = { results: [], summary: null, domainFilter: "" };
+
+      function renderBulk(d) {
+        if (!d.success) return renderError(d.error || "Bulk lookup failed");
+        bulkState = { results: d.results, summary: d.summary, domainFilter: "" };
+        return renderBulkPanel();
+      }
+
+      function renderBulkPanel() {
+        const { results, summary, domainFilter } = bulkState;
+
+        const card = (label, val, color) => {
+          const cls = {
+            slate: "bg-slate-50 border-slate-200 text-slate-900",
+            emerald: "bg-emerald-50 border-emerald-200 text-emerald-900",
+            amber: "bg-amber-50 border-amber-200 text-amber-900",
+            red: "bg-red-50 border-red-200 text-red-900",
+          }[color];
+          return `<div class="rounded-xl border p-4 ${cls}">
+            <div class="text-xs font-semibold uppercase tracking-wide opacity-70">${label}</div>
+            <div class="text-2xl font-bold mt-1">${val}</div>
+          </div>`;
+        };
+
+        // Unique domains from results that have an alternate domain
+        const domains = [...new Set(results
+          .filter((r) => r.alternateDomain)
+          .map((r) => r.alternateDomain))].sort();
+
+        // Apply current domain filter
+        const visible = domainFilter
+          ? results.filter((r) => r.alternateDomain === domainFilter)
+          : results;
+
+        const dash = `<span class="text-slate-300">—</span>`;
+        const rows = visible.map((r) => {
+          const status = !r.success
+            ? `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-red-100 text-red-700">error</span>`
+            : r.accountExists
+              ? `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-emerald-100 text-emerald-700">exists</span>`
+              : `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-amber-100 text-amber-700">not found</span>`;
+          return `<tr class="hover:bg-slate-50">
+            <td class="px-4 py-3 font-mono text-xs text-slate-900 break-all">${escapeHtml(r.email)}</td>
+            <td class="px-4 py-3">${status}</td>
+            <td class="px-4 py-3 font-mono text-xs text-slate-900">${r.alternateEmail ? escapeHtml(r.alternateEmail) : dash}</td>
+            <td class="px-4 py-3 font-mono text-xs">${r.alternateDomain ? `<span class="text-blue-600 font-semibold">${escapeHtml(r.alternateDomain)}</span>` : dash}</td>
+            <td class="px-4 py-3 font-mono text-xs text-slate-900">${r.phoneHint ? escapeHtml(r.phoneHint) : dash}</td>
+          </tr>`;
+        }).join("");
+
+        const emptyRow = visible.length === 0
+          ? `<tr><td colspan="5" class="px-4 py-8 text-center text-sm text-slate-400">No rows match the current filter.</td></tr>`
+          : "";
+
+        const domainOptions = domains
+          .map((d) => `<option value="${escapeHtml(d)}" ${d === domainFilter ? "selected" : ""}>${escapeHtml(d)}</option>`)
+          .join("");
+
+        const filterBadge = domainFilter
+          ? `<span class="text-xs text-slate-500">Showing <span class="font-semibold text-slate-700">${visible.length}</span> of ${results.length} (domain: <span class="font-mono text-blue-600">${escapeHtml(domainFilter)}</span>)</span>`
+          : `<span class="text-xs text-slate-500">Showing all <span class="font-semibold text-slate-700">${results.length}</span> results</span>`;
+
+        return `
+          <div class="grid grid-cols-4 gap-3">
+            ${card("Total", summary.total, "slate")}
+            ${card("Found", summary.accountsFound, "emerald")}
+            ${card("Not Found", summary.succeeded - summary.accountsFound, "amber")}
+            ${card("Errors", summary.failed, "red")}
+          </div>
+
+          <div class="bg-white rounded-2xl border border-slate-200 p-4 mt-3 flex flex-wrap items-end gap-3">
+            <div class="flex-1 min-w-[200px]">
+              <label class="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1.5">
+                Filter by alternate domain
+              </label>
+              <select id="domain-filter"
+                class="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="">All domains (${domains.length} unique)</option>
+                ${domainOptions}
+              </select>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button data-dl="all" class="text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-lg">
+                Download all
+              </button>
+              <button data-dl="success" class="text-xs font-semibold text-emerald-700 bg-emerald-100 hover:bg-emerald-200 px-3 py-2 rounded-lg">
+                Download successes only
+              </button>
+              <button data-dl="filtered" class="text-xs font-semibold text-blue-700 bg-blue-100 hover:bg-blue-200 px-3 py-2 rounded-lg">
+                Download filtered view
+              </button>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between mt-3 px-1">
+            ${filterBadge}
+          </div>
+
+          <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden mt-2">
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead class="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
+                  <tr>
+                    <th class="px-4 py-3 text-left font-semibold">Email</th>
+                    <th class="px-4 py-3 text-left font-semibold">Status</th>
+                    <th class="px-4 py-3 text-left font-semibold">Alternate Email</th>
+                    <th class="px-4 py-3 text-left font-semibold">Domain</th>
+                    <th class="px-4 py-3 text-left font-semibold">Phone</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100">${rows}${emptyRow}</tbody>
+              </table>
+            </div>
+          </div>`;
+      }
+
+      function downloadCSV(rows, suffix) {
+        const csv = rows.map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+        const blob = new Blob([csv], { type: "text/csv" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `microsoft-lookup-${suffix}-${Date.now()}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      function buildRows(results) {
+        const out = [["email", "status", "alternate_email", "domain", "phone", "error"]];
+        for (const r of results) {
+          out.push([
+            r.email,
+            !r.success ? "error" : r.accountExists ? "exists" : "not_found",
+            r.alternateEmail ?? "",
+            r.alternateDomain ?? "",
+            r.phoneHint ?? "",
+            r.error ?? "",
+          ]);
+        }
+        return out;
+      }
+
+      // Delegated handlers for filter + downloads
+      document.addEventListener("change", (e) => {
+        if (e.target?.id !== "domain-filter") return;
+        bulkState.domainFilter = e.target.value;
+        $("#bulk-result").innerHTML = renderBulkPanel();
+      });
+
+      document.addEventListener("click", (e) => {
+        const dl = e.target?.dataset?.dl;
+        if (!dl) return;
+        const { results, domainFilter } = bulkState;
+        if (dl === "all") {
+          downloadCSV(buildRows(results), "all");
+        } else if (dl === "success") {
+          const ok = results.filter((r) => r.success && r.accountExists);
+          if (!ok.length) return alert("No successful account hits to download.");
+          downloadCSV(buildRows(ok), "successes");
+        } else if (dl === "filtered") {
+          const view = domainFilter
+            ? results.filter((r) => r.alternateDomain === domainFilter)
+            : results;
+          if (!view.length) return alert("Nothing to download for the current filter.");
+          const tag = domainFilter ? `domain-${domainFilter}` : "all";
+          downloadCSV(buildRows(view), tag);
+        }
+      });
+    </script>
+  </body>
+</html>
