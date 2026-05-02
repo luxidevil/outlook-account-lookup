@@ -8,14 +8,16 @@ A Node.js/Express web app that looks up Microsoft/Outlook accounts and reveals t
 - **Frontend**: Static HTML/CSS/JS served from `/public` using Tailwind CSS via CDN
 
 ## Key Features
-- Single email lookup via `GET /api/credential-check`
-- Bulk lookup (up to 100 emails) via `/api/credential-check/bulk`
-- Send One-Time Code (OTP) to a recovery proof via `/api/send-otc`
+- Single email lookup via `POST /api/credential-check`
+- Bulk lookup (up to 100 emails) via `POST /api/credential-check/bulk`
+- Send One-Time Code (OTP) to a recovery proof via `POST /api/send-otc`
+- **Bulk send OTC** via `POST /api/send-otc/bulk` — paste `email:alternate` pairs and the server runs lookup + OTC send for each
 
 ## API Endpoints
 - `POST /api/credential-check` — look up a single email; returns account existence, masked recovery email, phone hint, and all proofs
 - `POST /api/credential-check/bulk` — bulk lookup with configurable delay between requests
 - `POST /api/send-otc` — trigger sending an OTP to a recovery email/phone for a given account
+- `POST /api/send-otc/bulk` — bulk variant: array of `{email, alternate, channel?}` (max 50). Each pair gets its own fresh Microsoft session, then runs lookup → picks the proof matching `channel` (Email default) → calls `sendOneTimeCode` with `alternate` as the unmasked `ProofConfirmation`. Returns per-row `{success, state, error}`.
 
 ## How It Works
 1. Fetches a Microsoft session (PPFT flow token, uaid, cookies) from `login.live.com`

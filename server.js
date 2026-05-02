@@ -423,6 +423,111 @@ app.post("/api/send-otc", async (req, res) => {
   });
 });
 
+/* ------------------------------------------------------------------ */
+/*  Bulk send OTC: accepts pairs of {email, alternate, channel?}      */
+/*  Frontend parses lines like `email:alter` and posts the array.     */
+/* ------------------------------------------------------------------ */
+app.post("/api/send-otc/bulk", async (req, res) => {
+  const { pairs, channel: defaultChannel, delayMs } = req.body ?? {};
+  if (!Array.isArray(pairs) || pairs.length === 0) {
+    return res.status(400).json({ success: false, error: "pairs must be a non-empty array" });
+  }
+  if (pairs.length > 50) {
+    return res.status(400).json({ success: false, error: "Maximum 50 pairs per request" });
+  }
+
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Server-side floor of 800ms between pairs to avoid getting throttled by Microsoft.
+  const pause = Math.max(800, Math.min(10000, delayMs ?? 1500));
+  const fallbackChannel = defaultChannel === "SMS" ? "SMS" : "Email";
+  const results = [];
+
+  for (let i = 0; i < pairs.length; i++) {
+    const raw = pairs[i] ?? {};
+    const email = typeof raw.email === "string" ? raw.email.trim() : "";
+    const alternate = typeof raw.alternate === "string" ? raw.alternate.trim() : "";
+    const reqChannel = raw.channel === "SMS" ? "SMS" : raw.channel === "Email" ? "Email" : fallbackChannel;
+    const proofType = reqChannel === "SMS" ? "phone" : "email";
+
+    // The full unmasked alternate is intentionally NOT echoed back in the
+    // response (it's recovery contact data). The frontend keeps its own
+    // copy of what it sent and merges by index for display.
+    const base = { index: i, email, channel: reqChannel };
+
+    if (!email || !email.includes("@") || !alternate) {
+      results.push({ ...base, success: false, error: "Invalid pair (expected email:alternate)" });
+      if (i < pairs.length - 1) await wait(pause);
+      continue;
+    }
+
+    try {
+      // Each pair gets its own fresh Microsoft session (the flowToken is
+      // tied to one credential check + one OTC send).
+      const session = await getMicrosoftSession();
+      if (!session) {
+        results.push({ ...base, success: false, error: "Could not reach Microsoft login page" });
+        if (i < pairs.length - 1) await wait(pause);
+        continue;
+      }
+
+      const lookup = await lookupOne(email, session);
+      if (!lookup.success) {
+        results.push({ ...base, success: false, error: lookup.error });
+        if (i < pairs.length - 1) await wait(pause);
+        continue;
+      }
+      if (!lookup.accountExists) {
+        results.push({ ...base, success: false, error: "No Microsoft account found" });
+        if (i < pairs.length - 1) await wait(pause);
+        continue;
+      }
+
+      const proof = lookup.allProofs.find((p) => p.type === proofType);
+      if (!proof) {
+        results.push({
+          ...base,
+          success: false,
+          error: `No ${proofType} recovery method on file`,
+          availableProofs: lookup.allProofs.map((p) => ({ type: p.type, display: p.display })),
+        });
+        if (i < pairs.length - 1) await wait(pause);
+        continue;
+      }
+
+      const otc = await sendOneTimeCode(
+        email,
+        session,
+        proof.proofToken,
+        proof.display,
+        reqChannel,
+        alternate,
+      );
+
+      results.push({
+        ...base,
+        proofDisplay: proof.display,
+        success: otc.success,
+        state: otc.state,
+        error: otc.error,
+      });
+    } catch (err) {
+      results.push({ ...base, success: false, error: err?.message ?? "Unknown error" });
+    }
+
+    if (i < pairs.length - 1) await wait(pause);
+  }
+
+  res.json({
+    success: true,
+    summary: {
+      total: results.length,
+      sent: results.filter((r) => r.success).length,
+      failed: results.filter((r) => !r.success).length,
+    },
+    results,
+  });
+});
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Outlook Account Lookup running on http://0.0.0.0:${PORT}`);
 });
