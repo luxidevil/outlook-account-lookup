@@ -167,8 +167,10 @@ async function lookupOne(email, session) {
                 ? "authenticator"
                 : `type_${p.type ?? "?"}`;
 
-        // Capture encrypted proof token (AltEmailE / AltPhoneE) if present
-        const proofToken = p.proof ?? p.proofToken ?? p.clearDigits ?? null;
+        // Capture encrypted proof token (becomes AltEmailE / AltPhoneE).
+        // Microsoft returns it in the `data` field; fall back to legacy names.
+        // Note: `clearDigits` is just an unmasked hint preview, NOT the token.
+        const proofToken = p.data ?? p.proof ?? p.proofToken ?? null;
 
         allProofs.push({
           type: typeName,
