@@ -35,6 +35,9 @@
         <button id="tab-otc" class="flex-1 py-2.5 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-50">
           Bulk Send OTC
         </button>
+        <button id="tab-login" class="flex-1 py-2.5 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-50">
+          Login
+        </button>
       </div>
 
       <!-- SINGLE -->
@@ -126,6 +129,31 @@
         <div id="otc-result" class="mt-4 space-y-3"></div>
       </section>
 
+      <!-- LOGIN (placeholder) -->
+      <section id="panel-login" class="hidden">
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-8 text-center">
+          <div class="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-slate-100 mb-4">
+            <svg class="w-6 h-6 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M15 12H3m0 0l4-4m-4 4l4 4m13-9v10a2 2 0 01-2 2h-4"/>
+            </svg>
+          </div>
+          <h2 class="text-lg font-bold text-slate-900">Full Login Flow</h2>
+          <p class="text-sm text-slate-500 mt-2 max-w-md mx-auto">
+            End-to-end sign-in: send the OTP, paste the code Microsoft just delivered, and have the
+            server complete <code class="bg-slate-100 px-1 py-0.5 rounded font-mono">ppsecure/post.srf</code>
+            for you — returning the resulting auth cookies / redirect URL.
+          </p>
+          <div class="inline-flex items-center gap-2 mt-5 px-3 py-1.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 text-xs font-semibold">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            Coming soon — backend already wired (<code class="font-mono">/api/verify-otc</code>), UI to follow.
+          </div>
+        </div>
+      </section>
+
       <p class="text-center text-xs text-slate-400 mt-6">
         Calls happen server-side using one shared session. Microsoft only returns masked hints
         (e.g. <code class="bg-slate-100 px-1 py-0.5 rounded font-mono">u***@g***.com</code>).
@@ -140,6 +168,7 @@
         single: { btn: $("#tab-single"), panel: $("#panel-single") },
         bulk:   { btn: $("#tab-bulk"),   panel: $("#panel-bulk")   },
         otc:    { btn: $("#tab-otc"),    panel: $("#panel-otc")    },
+        login:  { btn: $("#tab-login"),  panel: $("#panel-login")  },
       };
       function selectTab(which) {
         for (const [name, { btn, panel }] of Object.entries(tabs)) {
