@@ -167,8 +167,10 @@ async function lookupOne(email, session) {
                 ? "authenticator"
                 : `type_${p.type ?? "?"}`;
 
-        // Capture encrypted proof token (AltEmailE / AltPhoneE) if present
-        const proofToken = p.proof ?? p.proofToken ?? p.clearDigits ?? null;
+        // Capture encrypted proof token (AltEmailE / AltPhoneE) — the
+        // server-side response field is `data`, not `proof`. Confirmed via
+        // captured HAR + live debug log of GetCredentialType response.
+        const proofToken = p.data ?? p.proof ?? p.proofToken ?? null;
 
         allProofs.push({
           type: typeName,
@@ -215,10 +217,11 @@ async function sendOneTimeCode(
   const { flowToken, uaid, cookies } = session;
 
   // Microsoft's "Verify your identity" step requires the FULL un-masked
-  // alternate email or phone, prefixed with a tab character. The masked
+  // alternate email or phone as a plain value (no leading tab). The masked
   // `proofDisplay` (e.g. el****@de****.space) will be rejected.
+  // Confirmed against captured HAR: `ProofConfirmation=<full alt>`.
   const confirmationValue = proofConfirmation
-    ? `\t${proofConfirmation}`
+    ? proofConfirmation
     : proofDisplay;
 
   const params = new URLSearchParams({
