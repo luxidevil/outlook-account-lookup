@@ -808,6 +808,7 @@ app.post("/api/send-otc", async (req, res) => {
       email,
       uaid: session.uaid,
       cookies: session.cookies,
+      proxySession: session.proxySession,
       newFlowToken: otcResult.newFlowToken,
       proofDisplay: proof.display,
       proofType: proof.type,
@@ -847,7 +848,7 @@ app.post("/api/verify-otc", async (req, res) => {
     });
   }
 
-  const fakeSession = { uaid: s.uaid, cookies: s.cookies };
+  const fakeSession = { uaid: s.uaid, cookies: s.cookies, proxySession: s.proxySession };
   const result = await verifyOneTimeCode(
     s.email,
     fakeSession,
@@ -957,6 +958,7 @@ app.post("/api/send-otc/bulk", async (req, res) => {
           email,
           uaid: session.uaid,
           cookies: session.cookies,
+          proxySession: session.proxySession,
           newFlowToken: otc.newFlowToken,
           proofDisplay: proof.display,
           proofType: proof.type,
