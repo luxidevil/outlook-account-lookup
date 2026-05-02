@@ -3,6 +3,8 @@ import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { ImapFlow } from "imapflow";
+import dns from "dns/promises";
+import net from "net";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -440,8 +442,63 @@ async function verifyOneTimeCode(
 /*  `since`, and regex out the 6-digit code.                          */
 /* ------------------------------------------------------------------ */
 const OTC_REGEX = /single-use code is[:\s]*([0-9]{6,8})/i;
-const FALLBACK_REGEX = /\b([0-9]{6,8})\b/;
 const MS_FROM = "accountprotection.microsoft.com";
+
+/* SSRF guard — only allow standard IMAP ports and reject private/loopback IPs */
+const ALLOWED_IMAP_PORTS = new Set([143, 993]);
+function isPrivateIp(ip) {
+  if (!ip) return true;
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split(".").map(Number);
+    if (a === 10 || a === 127 || a === 0) return true;
+    if (a === 169 && b === 254) return true;        // link-local
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a >= 224) return true;                      // multicast / reserved
+    return false;
+  }
+  if (net.isIPv6(ip)) {
+    const lo = ip.toLowerCase();
+    return lo === "::1" || lo.startsWith("fc") || lo.startsWith("fd") ||
+           lo.startsWith("fe80") || lo.startsWith("ff") || lo === "::";
+  }
+  return true;
+}
+async function validateImapTarget(host, port) {
+  if (!ALLOWED_IMAP_PORTS.has(Number(port))) {
+    return `IMAP port must be 143 or 993 (got ${port})`;
+  }
+  let addrs;
+  try { addrs = await dns.lookup(host, { all: true }); }
+  catch (e) { return `Could not resolve IMAP host: ${e.code ?? e.message}`; }
+  for (const a of addrs) {
+    if (isPrivateIp(a.address)) {
+      return `IMAP host resolves to a private/loopback address (${a.address}) — refusing to connect`;
+    }
+  }
+  return null;
+}
+
+/* Tiny quoted-printable decoder so QP-encoded text/plain bodies still match. */
+function decodeQuotedPrintable(s) {
+  return s
+    .replace(/=\r?\n/g, "")
+    .replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+}
+function extractOtcFromSource(source) {
+  if (!source) return null;
+  const raw = source.toString("utf8");
+  // Try the raw bytes first (covers 7bit text/plain — what Microsoft sends)
+  let m = raw.match(OTC_REGEX);
+  if (m) return m[1];
+  // Try a QP-decoded view in case a relay re-encoded the body
+  try {
+    const qp = decodeQuotedPrintable(raw);
+    m = qp.match(OTC_REGEX);
+    if (m) return m[1];
+  } catch { /* ignore */ }
+  return null;
+}
 
 async function searchMailboxForOtc(client, mailbox, since) {
   try {
@@ -462,11 +519,10 @@ async function searchMailboxForOtc(client, mailbox, since) {
         );
         if (!msg) continue;
         if (msg.internalDate && msg.internalDate < since) continue;
-        const text = msg.source ? msg.source.toString("utf8") : "";
-        const m = text.match(OTC_REGEX) || text.match(FALLBACK_REGEX);
-        if (m) {
+        const code = extractOtcFromSource(msg.source);
+        if (code) {
           return {
-            code: m[1],
+            code,
             mailbox,
             messageId: msg.envelope?.messageId ?? null,
             subject: msg.envelope?.subject ?? null,
@@ -496,6 +552,8 @@ async function fetchOtcViaImap({
   if (!host || !user || !pass) {
     return { success: false, error: "host, user and pass are required" };
   }
+  const guardError = await validateImapTarget(host, port || 993);
+  if (guardError) return { success: false, error: guardError };
   const since = new Date(sinceMs ? sinceMs - 30_000 : Date.now() - 5 * 60_000);
   const deadline = Date.now() + Math.max(10_000, Math.min(180_000, timeoutMs ?? 90_000));
 
@@ -942,7 +1000,7 @@ app.post("/api/login-with-imap", async (req, res) => {
   const lookup = await lookupOne(email, session);
   if (!lookup.success || !lookup.accountExists) {
     log("lookup", false, lookup.error ?? "Account does not exist");
-    return res.json({ success: false, email, steps, error: log.error ?? "Lookup failed" });
+    return res.json({ success: false, email, steps, error: lookup.error ?? "Account does not exist" });
   }
   log("lookup", true, `recovery hint: ${lookup.alternateEmail ?? lookup.phoneHint ?? "?"}`);
 
