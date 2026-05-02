@@ -518,6 +518,15 @@ async function searchMailboxForOtc(client, mailbox, since, toAddress) {
         );
         if (!msg) continue;
         if (msg.internalDate && msg.internalDate < since) continue;
+        // Strict recipient check: some IMAP servers do loose TO substring matching,
+        // so re-verify the To/Cc/Bcc envelope contains an exact match.
+        if (toAddress) {
+          const want = String(toAddress).toLowerCase();
+          const recipients = []
+            .concat(msg.envelope?.to ?? [], msg.envelope?.cc ?? [], msg.envelope?.bcc ?? [])
+            .map((a) => (a?.address ?? "").toLowerCase());
+          if (!recipients.includes(want)) continue;
+        }
         const code = extractOtcFromSource(msg.source);
         if (code) {
           return {
