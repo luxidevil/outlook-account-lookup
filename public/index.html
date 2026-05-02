@@ -235,7 +235,6 @@
         if (!email) return;
 
         const statusEl = document.getElementById(`otc-status-${key}`);
-        const rowEl = document.getElementById(`proof-row-${key}`);
         btn.disabled = true;
         btn.textContent = "Sending…";
         if (statusEl) statusEl.textContent = "";
@@ -255,32 +254,6 @@
               statusEl.className = "text-xs text-emerald-600 font-semibold";
               statusEl.textContent = "OTP sent";
             }
-            // Show OTP entry row below this proof row
-            if (rowEl) {
-              const existing = document.getElementById(`otc-entry-${key}`);
-              if (existing) existing.remove();
-              const entryDiv = document.createElement("div");
-              entryDiv.id = `otc-entry-${key}`;
-              entryDiv.className = "flex items-center gap-2 px-3 pb-3";
-              entryDiv.innerHTML = `
-                <input
-                  type="text"
-                  inputmode="numeric"
-                  maxlength="8"
-                  placeholder="Enter OTP code"
-                  class="otc-input flex-1 px-3 py-2 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-                  data-session="${data.sessionId}"
-                  data-key="${key}" />
-                <button
-                  class="otc-verify-btn text-xs font-semibold px-3 py-2 rounded-lg bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50 whitespace-nowrap"
-                  data-session="${data.sessionId}"
-                  data-key="${key}">
-                  Verify
-                </button>
-                <span id="verify-status-${key}" class="text-xs"></span>`;
-              rowEl.insertAdjacentElement("afterend", entryDiv);
-              entryDiv.querySelector(".otc-input").focus();
-            }
           } else {
             btn.disabled = false;
             btn.textContent = "Send OTP";
@@ -297,64 +270,6 @@
             statusEl.textContent = err.message;
           }
         }
-      });
-
-      // --- OTC verify handler (delegated) ---
-      document.addEventListener("click", async (e) => {
-        const btn = e.target?.closest(".otc-verify-btn");
-        if (!btn) return;
-        const { session: sessionId, key } = btn.dataset;
-        const inputEl = document.querySelector(`.otc-input[data-key="${key}"]`);
-        const statusEl = document.getElementById(`verify-status-${key}`);
-        const otcCode = inputEl?.value?.trim();
-        if (!otcCode) return;
-
-        btn.disabled = true;
-        btn.textContent = "Verifying…";
-        if (statusEl) statusEl.textContent = "";
-
-        try {
-          const r = await fetch("/api/verify-otc", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sessionId, otcCode }),
-          });
-          const data = await r.json();
-          if (data.success) {
-            btn.textContent = "Verified ✓";
-            btn.classList.remove("bg-violet-600", "hover:bg-violet-700");
-            btn.classList.add("bg-emerald-600");
-            if (inputEl) inputEl.disabled = true;
-            if (statusEl) {
-              statusEl.className = "text-xs text-emerald-600 font-semibold";
-              statusEl.textContent = "Code accepted";
-            }
-          } else {
-            btn.disabled = false;
-            btn.textContent = "Verify";
-            if (statusEl) {
-              statusEl.className = "text-xs text-red-500";
-              statusEl.textContent = data.error ?? "Verification failed";
-            }
-          }
-        } catch (err) {
-          btn.disabled = false;
-          btn.textContent = "Verify";
-          if (statusEl) {
-            statusEl.className = "text-xs text-red-500";
-            statusEl.textContent = err.message;
-          }
-        }
-      });
-
-      // Allow pressing Enter in the OTP input to trigger verify
-      document.addEventListener("keydown", (e) => {
-        if (e.key !== "Enter") return;
-        const input = e.target?.closest(".otc-input");
-        if (!input) return;
-        const key = input.dataset.key;
-        const verifyBtn = document.querySelector(`.otc-verify-btn[data-key="${key}"]`);
-        verifyBtn?.click();
       });
 
       // --- Bulk ---
