@@ -5,6 +5,38 @@ import { fileURLToPath } from "url";
 import { ImapFlow } from "imapflow";
 import dns from "dns/promises";
 import net from "net";
+import { ProxyAgent } from "undici";
+
+/* ------------------------------------------------------------------ */
+/*  Residential-proxy rotation                                        */
+/*  PROXY_URL          — http://user:pass@host:port (required)        */
+/*  PROXY_ENABLED      — "false" disables rotation entirely           */
+/*  PROXY_ROTATE       — "session" (default, sticky per Microsoft     */
+/*                       sign-in flow) | "request" (new IP every      */
+/*                       fetch)                                       */
+/*  Provider session syntax (QuantumProxies / most others): append    */
+/*  `_session-XXXX` to the password to pin one IP for ~10 min.        */
+/* ------------------------------------------------------------------ */
+const proxyEnabled = () =>
+  !!process.env.PROXY_URL && process.env.PROXY_ENABLED !== "false";
+
+function newProxySession() {
+  return crypto.randomBytes(6).toString("hex");
+}
+
+function proxyDispatcher(sessionToken) {
+  if (!proxyEnabled()) return undefined;
+  let url;
+  try { url = new URL(process.env.PROXY_URL); }
+  catch { return undefined; }
+  const tok = sessionToken
+    || (process.env.PROXY_ROTATE === "request" ? newProxySession() : null);
+  if (tok && url.password) {
+    url.password = `${url.password}_session-${tok}`;
+  }
+  try { return new ProxyAgent(url.toString()); }
+  catch { return undefined; }
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -27,12 +59,16 @@ async function getMicrosoftSession() {
 
   const cookieJar = new Map();
   let html = "";
+  // One sticky proxy session for the whole sign-in flow (lookup→send→verify)
+  const proxySession = proxyEnabled() ? newProxySession() : null;
+  const dispatcher = proxyDispatcher(proxySession);
 
   for (let hop = 0; hop < 6; hop++) {
     const cookieHeader = [...cookieJar.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
 
     const res = await fetch(url, {
       redirect: "manual",
+      dispatcher,
       headers: {
         "User-Agent": UA,
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -75,6 +111,7 @@ async function getMicrosoftSession() {
     apiCanary: apiCanaryMatch
       ? apiCanaryMatch[1].replace(/\\u002f/g, "/").replace(/\\u003d/g, "=")
       : null,
+    proxySession,
   };
 }
 
@@ -82,7 +119,8 @@ async function getMicrosoftSession() {
 /*  Lookup a single email                                             */
 /* ------------------------------------------------------------------ */
 async function lookupOne(email, session) {
-  const { flowToken, uaid, cookies, apiCanary } = session;
+  const { flowToken, uaid, cookies, apiCanary, proxySession } = session;
+  const dispatcher = proxyDispatcher(proxySession);
 
   const body = JSON.stringify({
     checkPhones: false,
@@ -110,6 +148,7 @@ async function lookupOne(email, session) {
       `https://login.live.com/GetCredentialType.srf?mkt=EN-US&lc=1033&uaid=${uaid}`,
       {
         method: "POST",
+        dispatcher,
         headers: {
           "Content-Type": "application/json; charset=utf-8",
           "User-Agent": UA,
@@ -218,7 +257,8 @@ async function sendOneTimeCode(
   channel = "Email",
   proofConfirmation = null,
 ) {
-  const { flowToken, uaid, cookies } = session;
+  const { flowToken, uaid, cookies, proxySession } = session;
+  const dispatcher = proxyDispatcher(proxySession);
 
   // Microsoft's "Verify your identity" step requires the FULL un-masked
   // alternate email or phone as a plain value (no leading tab). The masked
@@ -252,6 +292,7 @@ async function sendOneTimeCode(
     "https://login.live.com/GetOneTimeCode.srf?id=292841&client_id=00000000487A244A",
     {
       method: "POST",
+      dispatcher,
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
         "User-Agent": UA,
@@ -335,7 +376,8 @@ async function verifyOneTimeCode(
   proofConfirmation,
   proofType,
 ) {
-  const { uaid, cookies } = session;
+  const { uaid, cookies, proxySession } = session;
+  const dispatcher = proxyDispatcher(proxySession);
   const proofTypeNum = proofType === "phone" ? "3" : "1";
 
   const params = new URLSearchParams({
@@ -379,6 +421,7 @@ async function verifyOneTimeCode(
   const verifyRes = await fetch(verifyUrl, {
     method: "POST",
     redirect: "manual",
+    dispatcher,
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       "User-Agent": UA,
@@ -1041,7 +1084,7 @@ app.post("/api/login-with-imap", async (req, res) => {
   log("imap-fetch", true, `code=${fetched.code} from ${fetched.mailbox} (subject: ${fetched.subject ?? "?"})`);
 
   // 5. Verify OTC
-  const verifySession = { uaid: session.uaid, cookies: session.cookies };
+  const verifySession = { uaid: session.uaid, cookies: session.cookies, proxySession: session.proxySession };
   const verify = await verifyOneTimeCode(
     email, verifySession, otc.newFlowToken, fetched.code,
     proof.proofToken, alternate, proof.type,
@@ -1152,7 +1195,7 @@ app.post("/api/login-with-imap/bulk", async (req, res) => {
           continue;
         }
 
-        const verifySession = { uaid: session.uaid, cookies: session.cookies };
+        const verifySession = { uaid: session.uaid, cookies: session.cookies, proxySession: session.proxySession };
         const verify = await verifyOneTimeCode(
           email, verifySession, otc.newFlowToken, fetched.code,
           proof.proofToken, alternate, proof.type,
@@ -1186,6 +1229,44 @@ app.post("/api/login-with-imap/bulk", async (req, res) => {
       failed: results.filter((r) => !r.success).length,
     },
     results,
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Proxy status — verify rotation by hitting api.ipify.org           */
+/* ------------------------------------------------------------------ */
+app.get("/api/proxy-status", async (req, res) => {
+  if (!proxyEnabled()) {
+    return res.json({
+      enabled: false,
+      reason: !process.env.PROXY_URL
+        ? "PROXY_URL is not set"
+        : "PROXY_ENABLED=false",
+    });
+  }
+  const samples = Math.max(1, Math.min(5, +req.query.samples || 3));
+  const mode = process.env.PROXY_ROTATE === "request" ? "per-request" : "per-session (sticky)";
+  const ips = [];
+  for (let i = 0; i < samples; i++) {
+    const session = mode === "per-request" ? null : newProxySession();
+    try {
+      const r = await fetch("https://api.ipify.org?format=json", {
+        dispatcher: proxyDispatcher(session),
+      });
+      const d = await r.json();
+      ips.push({ session: session ?? "(per-request)", ip: d.ip });
+    } catch (e) {
+      ips.push({ session: session ?? "(per-request)", error: e?.message ?? "fetch failed" });
+    }
+  }
+  const unique = new Set(ips.map((x) => x.ip).filter(Boolean));
+  res.json({
+    enabled: true,
+    mode,
+    samples,
+    rotating: unique.size > 1,
+    uniqueIps: unique.size,
+    ips,
   });
 });
 
