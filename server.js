@@ -37,9 +37,9 @@ function proxyDispatcher(sessionToken) {
     const suffixMatch = pass.match(/(_country-[^_]+.*)$/i);
     if (suffixMatch) {
       const base = pass.slice(0, suffixMatch.index);
-      url.password = encodeURIComponent(`${base}_session-${tok}${suffixMatch[1]}`);
+      url.password = `${base}_session-${tok}${suffixMatch[1]}`;
     } else {
-      url.password = encodeURIComponent(`${pass}_session-${tok}`);
+      url.password = `${pass}_session-${tok}`;
     }
   }
   try { return new HttpsProxyAgent(url.toString()); }
