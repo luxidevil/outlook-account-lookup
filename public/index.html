@@ -531,28 +531,103 @@
         e.preventDefault();
         const emails = parseEmails();
         if (!emails.length) return;
-        const delayMs = Number($("#bulk-delay").value) || 800;
         const btn = $("#bulk-btn");
         const out = $("#bulk-result");
         btn.disabled = true; btn.textContent = "Running…";
+        const total = emails.length;
+
         out.innerHTML = `
-          <div class="bg-white rounded-2xl border border-slate-200 p-5 text-sm text-slate-600 flex items-center gap-3">
-            <svg class="w-5 h-5 animate-spin text-blue-600" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
-            </svg>
-            <span>Processing ${emails.length} email${emails.length === 1 ? "" : "s"} sequentially…</span>
+          <div id="bulk-live-header" class="rounded-2xl border border-slate-200 bg-white p-4 mb-3 flex items-center justify-between flex-wrap gap-3">
+            <div class="flex items-center gap-2 text-sm text-slate-700">
+              <svg id="bulk-spin" class="w-4 h-4 animate-spin text-blue-600" fill="none" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"></circle>
+                <path d="M4 12a8 8 0 018-8" stroke="currentColor" stroke-width="3" class="opacity-75"></path>
+              </svg>
+              <span id="bulk-live-progress">0 / ${total}</span>
+              <span class="text-slate-300">·</span>
+              <span class="text-emerald-700">found <b id="bulk-live-found">0</b></span>
+              <span class="text-red-700">failed <b id="bulk-live-fail">0</b></span>
+            </div>
+          </div>
+          <div class="rounded-2xl border border-slate-200 bg-white overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th class="px-4 py-3 text-left font-semibold">Email</th>
+                  <th class="px-4 py-3 text-left font-semibold">Status</th>
+                  <th class="px-4 py-3 text-left font-semibold">Alternate Email</th>
+                  <th class="px-4 py-3 text-left font-semibold">Domain</th>
+                  <th class="px-4 py-3 text-left font-semibold">Phone</th>
+                </tr>
+              </thead>
+              <tbody id="bulk-live-rows" class="divide-y divide-slate-100"></tbody>
+            </table>
           </div>`;
+
+        let doneCount = 0, foundCount = 0, failCount = 0;
+        const allResults = [];
+        const dash = `<span class="text-slate-300">—</span>`;
+
+        function insertBulkRow(r) {
+          const status = !r.success
+            ? `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-red-100 text-red-700">error</span>`
+            : r.accountExists
+              ? `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-emerald-100 text-emerald-700">exists</span>`
+              : `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-amber-100 text-amber-700">not found</span>`;
+          const tr = document.createElement("tr");
+          tr.className = "hover:bg-slate-50";
+          tr.innerHTML = `
+            <td class="px-4 py-3 font-mono text-xs text-slate-900 break-all">${escapeHtml(r.email)}</td>
+            <td class="px-4 py-3">${status}</td>
+            <td class="px-4 py-3 font-mono text-xs text-slate-900">${r.alternateEmail ? escapeHtml(r.alternateEmail) : dash}</td>
+            <td class="px-4 py-3 font-mono text-xs">${r.alternateDomain ? `<span class="text-blue-600 font-semibold">${escapeHtml(r.alternateDomain)}</span>` : dash}</td>
+            <td class="px-4 py-3 font-mono text-xs text-slate-900">${r.phoneHint ? escapeHtml(r.phoneHint) : dash}</td>`;
+          $("#bulk-live-rows").appendChild(tr);
+        }
+
         try {
           const r = await fetch("/api/credential-check/bulk", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ emails, delayMs }),
+            body: JSON.stringify({ emails }),
           });
-          const data = await r.json();
-          out.innerHTML = renderBulk(data);
+          if (!r.ok || !r.body) throw new Error(`Server error (${r.status})`);
+          const reader = r.body.getReader();
+          const dec = new TextDecoder();
+          let buf = "";
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            let nl;
+            while ((nl = buf.indexOf("\n")) !== -1) {
+              const line = buf.slice(0, nl).trim();
+              buf = buf.slice(nl + 1);
+              if (!line) continue;
+              let evt;
+              try { evt = JSON.parse(line); } catch { continue; }
+              if (evt.type === "row") {
+                allResults.push(evt);
+                insertBulkRow(evt);
+                doneCount++;
+                if (evt.success && evt.accountExists) foundCount++;
+                else if (!evt.success) failCount++;
+                $("#bulk-live-progress").textContent = `${doneCount} / ${total}`;
+                $("#bulk-live-found").textContent = foundCount;
+                $("#bulk-live-fail").textContent = failCount;
+              } else if (evt.type === "summary") {
+                $("#bulk-spin")?.remove();
+                bulkState = {
+                  results: allResults,
+                  summary: { total: evt.total, succeeded: evt.succeeded, accountsFound: evt.accountsFound, failed: evt.failed },
+                  domainFilter: "",
+                };
+                out.innerHTML = renderBulkPanel();
+              }
+            }
+          }
         } catch (err) {
-          out.innerHTML = renderError(err.message);
+          out.insertAdjacentHTML("afterbegin", renderError(err.message));
         } finally {
           btn.disabled = false; btn.textContent = "Lookup";
         }
@@ -759,37 +834,98 @@
           return;
         }
         const channel = $("#otc-channel").value === "SMS" ? "SMS" : "Email";
-        const delayMs = Number($("#otc-delay").value) || 1500;
         const btn = $("#otc-btn");
         const out = $("#otc-result");
         btn.disabled = true;
         btn.textContent = "Sending…";
+        const total = pairs.length;
+        const dash = `<span class="text-slate-300">—</span>`;
+
         out.innerHTML = `
-          <div class="bg-white rounded-2xl border border-slate-200 p-5 text-sm text-slate-600 flex items-center gap-3">
-            <svg class="w-5 h-5 animate-spin text-violet-600" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+          <div id="otc-live-header" class="rounded-2xl border border-slate-200 bg-white p-4 mb-3 flex items-center gap-3 text-sm text-slate-700">
+            <svg id="otc-spin" class="w-4 h-4 animate-spin text-violet-600 shrink-0" fill="none" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"></circle>
+              <path d="M4 12a8 8 0 018-8" stroke="currentColor" stroke-width="3" class="opacity-75"></path>
             </svg>
-            <span>Sending OTC for ${pairs.length} pair${pairs.length === 1 ? "" : "s"} sequentially (${channel})…</span>
+            <span id="otc-live-progress">0 / ${total}</span>
+            <span class="text-slate-300">·</span>
+            <span class="text-emerald-700">sent <b id="otc-live-sent">0</b></span>
+            <span class="text-red-700">failed <b id="otc-live-fail">0</b></span>
+          </div>
+          <div class="rounded-2xl border border-slate-200 bg-white overflow-hidden">
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead class="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
+                  <tr>
+                    <th class="px-4 py-3 text-left font-semibold">Email</th>
+                    <th class="px-4 py-3 text-left font-semibold">Alternate</th>
+                    <th class="px-4 py-3 text-left font-semibold">Hint matched</th>
+                    <th class="px-4 py-3 text-left font-semibold">Channel</th>
+                    <th class="px-4 py-3 text-left font-semibold">Status</th>
+                    <th class="px-4 py-3 text-left font-semibold">Detail</th>
+                  </tr>
+                </thead>
+                <tbody id="otc-live-rows" class="divide-y divide-slate-100"></tbody>
+              </table>
+            </div>
           </div>`;
+
+        let doneCount = 0, sentCount = 0, failCount = 0;
+        const allResults = [];
+
+        function insertOtcRow(r) {
+          const alt = pairs[r.index]?.alternate ?? "";
+          const status = r.success
+            ? `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-emerald-100 text-emerald-700">sent</span>`
+            : `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-red-100 text-red-700">failed</span>`;
+          const tr = document.createElement("tr");
+          tr.className = "hover:bg-slate-50";
+          tr.innerHTML = `
+            <td class="px-4 py-3 font-mono text-xs text-slate-900 break-all">${escapeHtml(r.email)}</td>
+            <td class="px-4 py-3 font-mono text-xs text-slate-900 break-all">${escapeHtml(alt)}</td>
+            <td class="px-4 py-3 font-mono text-xs text-slate-700">${r.proofDisplay ? escapeHtml(r.proofDisplay) : dash}</td>
+            <td class="px-4 py-3 text-xs text-slate-500">${escapeHtml(r.channel ?? "")}</td>
+            <td class="px-4 py-3">${status}</td>
+            <td class="px-4 py-3 text-xs text-slate-600">${r.success ? `state ${escapeHtml(String(r.state ?? "?"))}` : escapeHtml(r.error ?? "unknown")}</td>`;
+          $("#otc-live-rows").appendChild(tr);
+        }
+
         try {
           const r = await fetch("/api/send-otc/bulk", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ pairs, channel, delayMs }),
+            body: JSON.stringify({ pairs, channel }),
           });
-          const data = await r.json();
-          // Merge the unmasked alternate back from our local copy (the server
-          // intentionally doesn't echo it). Match by index, fall back to email.
-          if (data.success && Array.isArray(data.results)) {
-            data.results = data.results.map((row, i) => ({
-              ...row,
-              alternate: pairs[row.index ?? i]?.alternate ?? pairs[i]?.alternate ?? "",
-            }));
+          if (!r.ok || !r.body) throw new Error(`Server error (${r.status})`);
+          const reader = r.body.getReader();
+          const dec = new TextDecoder();
+          let buf = "";
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            let nl;
+            while ((nl = buf.indexOf("\n")) !== -1) {
+              const line = buf.slice(0, nl).trim();
+              buf = buf.slice(nl + 1);
+              if (!line) continue;
+              let evt;
+              try { evt = JSON.parse(line); } catch { continue; }
+              if (evt.type === "row") {
+                allResults.push(evt);
+                insertOtcRow(evt);
+                doneCount++;
+                if (evt.success) sentCount++; else failCount++;
+                $("#otc-live-progress").textContent = `${doneCount} / ${total}`;
+                $("#otc-live-sent").textContent = sentCount;
+                $("#otc-live-fail").textContent = failCount;
+              } else if (evt.type === "summary") {
+                $("#otc-spin")?.remove();
+              }
+            }
           }
-          out.innerHTML = renderOtcBulk(data);
         } catch (err) {
-          out.innerHTML = renderError(err.message);
+          out.insertAdjacentHTML("afterbegin", renderError(err.message));
         } finally {
           btn.disabled = false;
           btn.textContent = "Send OTC to all";
