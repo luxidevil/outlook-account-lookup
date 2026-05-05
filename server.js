@@ -32,7 +32,14 @@ function proxyDispatcher(sessionToken) {
   const tok = sessionToken
     || (process.env.PROXY_ROTATE === "request" ? newProxySession() : null);
   if (tok && url.password) {
-    url.password = `${url.password}_session-${tok}`;
+    const pass = decodeURIComponent(url.password);
+    const suffixMatch = pass.match(/(_country-[^_]+.*)$/i);
+    if (suffixMatch) {
+      const base = pass.slice(0, suffixMatch.index);
+      url.password = encodeURIComponent(`${base}_session-${tok}${suffixMatch[1]}`);
+    } else {
+      url.password = encodeURIComponent(`${pass}_session-${tok}`);
+    }
   }
   try { return new ProxyAgent(url.toString()); }
   catch { return undefined; }
