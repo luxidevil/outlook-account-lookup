@@ -722,8 +722,8 @@ app.post("/api/credential-check/bulk", async (req, res) => {
   if (!Array.isArray(emails) || emails.length === 0) {
     return res.status(400).json({ success: false, error: "emails must be a non-empty array" });
   }
-  if (emails.length > 100) {
-    return res.status(400).json({ success: false, error: "Maximum 100 emails per request" });
+  if (emails.length > 1000) {
+    return res.status(400).json({ success: false, error: "Maximum 1000 emails per request" });
   }
 
   const cleaned = emails
@@ -1165,8 +1165,8 @@ app.post("/api/login-with-imap/bulk", async (req, res) => {
   if (!Array.isArray(pairs) || pairs.length === 0) {
     return res.status(400).json({ success: false, error: "pairs must be a non-empty array" });
   }
-  if (pairs.length > 100) {
-    return res.status(400).json({ success: false, error: "Maximum 100 pairs per request" });
+  if (pairs.length > 1000) {
+    return res.status(400).json({ success: false, error: "Maximum 1000 pairs per request" });
   }
   if (!imap || !imap.host || !imap.user || !imap.pass) {
     return res.status(400).json({ success: false, error: "imap.host / user / pass are required" });
@@ -1238,7 +1238,7 @@ app.post("/api/login-with-imap/bulk-sync", async (req, res) => {
   if (!Array.isArray(pairs) || pairs.length === 0) {
     return res.status(400).json({ success: false, error: "pairs must be a non-empty array" });
   }
-  if (pairs.length > 100) return res.status(400).json({ success: false, error: "Maximum 100 pairs per request" });
+  if (pairs.length > 1000) return res.status(400).json({ success: false, error: "Maximum 1000 pairs per request" });
   if (!imap || !imap.host || !imap.user || !imap.pass) {
     return res.status(400).json({ success: false, error: "imap.host / user / pass are required" });
   }
