@@ -72,13 +72,17 @@
               class="w-full px-3 py-2.5 rounded-lg border border-slate-200 text-slate-900 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"></textarea>
             <p class="text-xs text-slate-400 mt-1.5">Paste one email per line, or comma/space separated. Up to 100.</p>
           </div>
-          <div class="flex items-end gap-3">
-            <div class="flex-1">
-              <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
-                Delay between requests (ms)
-              </label>
-              <input id="bulk-delay" type="number" min="0" max="5000" step="100" value="800"
-                class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          <div class="flex items-end gap-3 flex-wrap">
+            <div class="flex-1 min-w-[200px]">
+              <div class="flex items-center justify-between mb-1.5">
+                <label class="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                  Concurrency
+                </label>
+                <span id="bulk-concurrency-val" class="text-xs font-bold text-blue-600">5 parallel</span>
+              </div>
+              <input id="bulk-concurrency" type="range" min="1" max="10" value="5"
+                class="w-full accent-blue-600" />
+              <div class="flex justify-between text-xs text-slate-400 mt-0.5"><span>1</span><span>10</span></div>
             </div>
             <button type="submit" id="bulk-btn"
               class="px-6 py-2.5 rounded-lg bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap">
@@ -116,12 +120,16 @@
                 <option value="SMS">SMS (alternate is recovery phone)</option>
               </select>
             </div>
-            <div class="w-40">
-              <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
-                Delay (ms)
-              </label>
-              <input id="otc-delay" type="number" min="0" max="10000" step="100" value="1500"
-                class="w-full px-3 py-2 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            <div class="flex-1 min-w-[160px]">
+              <div class="flex items-center justify-between mb-1.5">
+                <label class="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                  Concurrency
+                </label>
+                <span id="otc-concurrency-val" class="text-xs font-bold text-violet-600">5 parallel</span>
+              </div>
+              <input id="otc-concurrency" type="range" min="1" max="10" value="5"
+                class="w-full accent-violet-600" />
+              <div class="flex justify-between text-xs text-slate-400 mt-0.5"><span>1</span><span>10</span></div>
             </div>
             <button type="submit" id="otc-btn"
               class="px-6 py-2.5 rounded-lg bg-violet-600 text-white font-semibold text-sm hover:bg-violet-700 disabled:opacity-50 whitespace-nowrap">
@@ -527,6 +535,14 @@
         bulkCount.textContent = `${n} email${n === 1 ? "" : "s"} detected`;
       });
 
+      // Concurrency slider live labels
+      $("#bulk-concurrency").addEventListener("input", (e) => {
+        $("#bulk-concurrency-val").textContent = `${e.target.value} parallel`;
+      });
+      $("#otc-concurrency").addEventListener("input", (e) => {
+        $("#otc-concurrency-val").textContent = `${e.target.value} parallel`;
+      });
+
       $("#bulk-form").addEventListener("submit", async (e) => {
         e.preventDefault();
         const emails = parseEmails();
@@ -586,10 +602,11 @@
         }
 
         try {
+          const concurrency = Math.max(1, Math.min(10, +$("#bulk-concurrency").value || 5));
           const r = await fetch("/api/credential-check/bulk", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ emails }),
+            body: JSON.stringify({ emails, concurrency }),
           });
           if (!r.ok || !r.body) throw new Error(`Server error (${r.status})`);
           const reader = r.body.getReader();
@@ -891,10 +908,11 @@
         }
 
         try {
+          const concurrency = Math.max(1, Math.min(10, +$("#otc-concurrency").value || 5));
           const r = await fetch("/api/send-otc/bulk", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ pairs, channel }),
+            body: JSON.stringify({ pairs, channel, concurrency }),
           });
           if (!r.ok || !r.body) throw new Error(`Server error (${r.status})`);
           const reader = r.body.getReader();

@@ -752,7 +752,7 @@ app.post("/api/credential-check/bulk", async (req, res) => {
 
   send({ type: "open", total: cleaned.length });
 
-  const CONCURRENCY = 5;
+  const CONCURRENCY = Math.max(1, Math.min(10, +req.body?.concurrency || 5));
   const results = [];
 
   await runConcurrentStream(cleaned, CONCURRENCY, async (email, i) => {
@@ -935,7 +935,7 @@ app.post("/api/send-otc/bulk", async (req, res) => {
   const fallbackChannel = defaultChannel === "SMS" ? "SMS" : "Email";
   send({ type: "open", total: pairs.length });
 
-  const CONCURRENCY = 5;
+  const CONCURRENCY = Math.max(1, Math.min(10, +req.body?.concurrency || 5));
   const results = [];
 
   await runConcurrentStream(pairs, CONCURRENCY, async (raw, i) => {
