@@ -5,7 +5,8 @@ import { fileURLToPath } from "url";
 import { ImapFlow } from "imapflow";
 import dns from "dns/promises";
 import net from "net";
-import { ProxyAgent } from "undici";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import nodeFetch from "node-fetch";
 
 /* ------------------------------------------------------------------ */
 /*  Residential-proxy rotation                                        */
@@ -41,7 +42,7 @@ function proxyDispatcher(sessionToken) {
       url.password = encodeURIComponent(`${pass}_session-${tok}`);
     }
   }
-  try { return new ProxyAgent(url.toString()); }
+  try { return new HttpsProxyAgent(url.toString()); }
   catch { return undefined; }
 }
 
@@ -73,9 +74,9 @@ async function getMicrosoftSession() {
   for (let hop = 0; hop < 6; hop++) {
     const cookieHeader = [...cookieJar.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
 
-    const res = await fetch(url, {
+    const res = await nodeFetch(url, {
       redirect: "manual",
-      dispatcher,
+      agent: dispatcher,
       headers: {
         "User-Agent": UA,
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -84,7 +85,7 @@ async function getMicrosoftSession() {
       },
     });
 
-    const setCookies = res.headers.getSetCookie?.() ?? [];
+    const setCookies = res.headers.raw()['set-cookie'] ?? [];
     for (const sc of setCookies) {
       const first = sc.split(";")[0];
       const eq = first.indexOf("=");
@@ -151,11 +152,11 @@ async function lookupOne(email, session) {
   });
 
   try {
-    const apiRes = await fetch(
+    const apiRes = await nodeFetch(
       `https://login.live.com/GetCredentialType.srf?mkt=EN-US&lc=1033&uaid=${uaid}`,
       {
         method: "POST",
-        dispatcher,
+        agent: dispatcher,
         headers: {
           "Content-Type": "application/json; charset=utf-8",
           "User-Agent": UA,
@@ -295,11 +296,11 @@ async function sendOneTimeCode(
     }
   }
 
-  const otcRes = await fetch(
+  const otcRes = await nodeFetch(
     "https://login.live.com/GetOneTimeCode.srf?id=292841&client_id=00000000487A244A",
     {
       method: "POST",
-      dispatcher,
+      agent: dispatcher,
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
         "User-Agent": UA,
@@ -425,10 +426,10 @@ async function verifyOneTimeCode(
     `https://login.live.com/ppsecure/post.srf?` +
     `username=${encodeURIComponent(email)}&uaid=${uaid}&pid=15216`;
 
-  const verifyRes = await fetch(verifyUrl, {
+  const verifyRes = await nodeFetch(verifyUrl, {
     method: "POST",
     redirect: "manual",
-    dispatcher,
+    agent: dispatcher,
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       "User-Agent": UA,
@@ -1298,8 +1299,8 @@ app.get("/api/proxy-status", async (req, res) => {
   for (let i = 0; i < samples; i++) {
     const session = mode === "per-request" ? null : newProxySession();
     try {
-      const r = await fetch("https://api.ipify.org?format=json", {
-        dispatcher: proxyDispatcher(session),
+      const r = await nodeFetch("https://api.ipify.org?format=json", {
+        agent: proxyDispatcher(session),
       });
       const d = await r.json();
       ips.push({ session: session ?? "(per-request)", ip: d.ip });
