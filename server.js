@@ -30,18 +30,6 @@ function proxyDispatcher(sessionToken) {
   let url;
   try { url = new URL(process.env.PROXY_URL); }
   catch { return undefined; }
-  const tok = sessionToken
-    || (process.env.PROXY_ROTATE === "request" ? newProxySession() : null);
-  if (tok && url.password) {
-    const pass = decodeURIComponent(url.password);
-    const suffixMatch = pass.match(/(_country-[^_]+.*)$/i);
-    if (suffixMatch) {
-      const base = pass.slice(0, suffixMatch.index);
-      url.password = `${base}_session-${tok}${suffixMatch[1]}`;
-    } else {
-      url.password = `${pass}_session-${tok}`;
-    }
-  }
   try { return new HttpsProxyAgent(url.toString()); }
   catch { return undefined; }
 }
