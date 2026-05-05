@@ -184,8 +184,8 @@ async function lookupOne(email, session) {
     }
 
     const ifExists = data.IfExistsResult;
-    // 0 = exists on consumer side, 6 = exists in another tenant, 1 = does not exist
-    const accountExists = ifExists === 0 || ifExists === 6;
+    // 0 = exists (consumer), 5 = exists (password page, no proofs), 6 = exists (other tenant), 1 = does not exist
+    const accountExists = ifExists === 0 || ifExists === 5 || ifExists === 6;
 
     let alternateEmail = null;
     let alternateDomain = null;
