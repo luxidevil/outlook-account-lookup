@@ -584,17 +584,22 @@
         const allResults = [];
         const dash = `<span class="text-slate-300">—</span>`;
 
+        function makeBulkStatus(r) {
+          if (!r.success)
+            return `<div><span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-red-100 text-red-700">error</span><div class="text-xs text-red-500 mt-1 break-all">${escapeHtml(r.error ?? "unknown error")}</div></div>`;
+          if (!r.accountExists)
+            return `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-amber-100 text-amber-700">not found</span>`;
+          if (!r.alternateEmail && !r.phoneHint)
+            return `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-slate-100 text-slate-600">no recovery</span>`;
+          return `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-emerald-100 text-emerald-700">exists</span>`;
+        }
+
         function insertBulkRow(r) {
-          const status = !r.success
-            ? `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-red-100 text-red-700">error</span>`
-            : r.accountExists
-              ? `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-emerald-100 text-emerald-700">exists</span>`
-              : `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-amber-100 text-amber-700">not found</span>`;
           const tr = document.createElement("tr");
           tr.className = "hover:bg-slate-50";
           tr.innerHTML = `
             <td class="px-4 py-3 font-mono text-xs text-slate-900 break-all">${escapeHtml(r.email)}</td>
-            <td class="px-4 py-3">${status}</td>
+            <td class="px-4 py-3">${makeBulkStatus(r)}</td>
             <td class="px-4 py-3 font-mono text-xs text-slate-900">${r.alternateEmail ? escapeHtml(r.alternateEmail) : dash}</td>
             <td class="px-4 py-3 font-mono text-xs">${r.alternateDomain ? `<span class="text-blue-600 font-semibold">${escapeHtml(r.alternateDomain)}</span>` : dash}</td>
             <td class="px-4 py-3 font-mono text-xs text-slate-900">${r.phoneHint ? escapeHtml(r.phoneHint) : dash}</td>`;
@@ -685,14 +690,9 @@
 
         const dash = `<span class="text-slate-300">—</span>`;
         const rows = visible.map((r) => {
-          const status = !r.success
-            ? `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-red-100 text-red-700">error</span>`
-            : r.accountExists
-              ? `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-emerald-100 text-emerald-700">exists</span>`
-              : `<span class="inline-flex items-center text-xs font-semibold px-2 py-1 rounded bg-amber-100 text-amber-700">not found</span>`;
           return `<tr class="hover:bg-slate-50">
             <td class="px-4 py-3 font-mono text-xs text-slate-900 break-all">${escapeHtml(r.email)}</td>
-            <td class="px-4 py-3">${status}</td>
+            <td class="px-4 py-3">${makeBulkStatus(r)}</td>
             <td class="px-4 py-3 font-mono text-xs text-slate-900">${r.alternateEmail ? escapeHtml(r.alternateEmail) : dash}</td>
             <td class="px-4 py-3 font-mono text-xs">${r.alternateDomain ? `<span class="text-blue-600 font-semibold">${escapeHtml(r.alternateDomain)}</span>` : dash}</td>
             <td class="px-4 py-3 font-mono text-xs text-slate-900">${r.phoneHint ? escapeHtml(r.phoneHint) : dash}</td>
